@@ -1,0 +1,73 @@
+name: remoteagent-joke-agent
+
+services:
+  agent:
+    image: remoteagent/joke-agent:${REMOTEAGENT_VERSION:-local}
+    build:
+      context: ..
+      dockerfile: joke-agent/Dockerfile
+      network: ${REMOTEAGENT_BUILD_NETWORK:-default}
+      args:
+        REMOTEAGENT_VERSION: ${REMOTEAGENT_VERSION:-local}
+    profiles: ["runner"]
+    user: ${REMOTEAGENT_UID:-1000}:${REMOTEAGENT_GID:-1000}
+    environment:
+      CODEX_HOME: /home/agent/.codex
+      REMOTEAGENT_AGENT_ID: joke-agent
+      REMOTEAGENT_WORKSPACE: /workspace
+      REMOTEAGENT_SESSIONS: /home/agent/.codex/sessions
+      REMOTEAGENT_ARTIFACTS: /workspace/artifacts
+      REMOTEAGENT_SKILLS: /opt/remoteagent/skills
+      REMOTEAGENT_JOB_ID: ${REMOTEAGENT_JOB_ID:-manual-validation}
+      REMOTEAGENT_CONVERSATION_KEY: ${REMOTEAGENT_CONVERSATION_KEY:-manual-validation}
+    volumes:
+      # CODEX_HOME carries only shared credentials/config; the nested sessions
+      # mount isolates conversation rollout state for exact-id resume.
+      - type: volume
+        source: codex-auth
+        target: /home/agent/.codex
+      - type: bind
+        source: ${REMOTEAGENT_SESSIONS_PATH:-../.runtime/empty/sessions}
+        target: /home/agent/.codex/sessions
+      - type: bind
+        source: ${REMOTEAGENT_WORKSPACE_PATH:-../.runtime/empty/workspace}
+        target: /workspace
+      - type: bind
+        source: ${REMOTEAGENT_ARTIFACTS_PATH:-../.runtime/empty/artifacts}
+        target: /workspace/artifacts
+      - type: volume
+        source: common-skills
+        target: /opt/remoteagent/skills
+        read_only: true
+    networks:
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+      # Codex's inner Bubblewrap sandbox must create its own user/mount
+      # namespace. The managed Codex policy still constrains its filesystem.
+      - seccomp=unconfined
+      - apparmor=unconfined
+    pids_limit: 256
+    mem_limit: ${REMOTEAGENT_AGENT_MEMORY_LIMIT:-2g}
+    cpus: ${REMOTEAGENT_AGENT_CPU_LIMIT:-2.0}
+    labels:
+      io.remoteagent.managed: "true"
+      io.remoteagent.instance: ${REMOTEAGENT_INSTANCE_ID:-remoteagent}
+      io.remoteagent.agent.id: joke-agent
+      io.remoteagent.job.id: ${REMOTEAGENT_JOB_ID:-manual-validation}
+      io.remoteagent.conversation.key: ${REMOTEAGENT_CONVERSATION_KEY:-manual-validation}
+
+networks:
+  egress: {}
+
+volumes:
+  codex-auth:
+    external: true
+    name: ${REMOTEAGENT_AUTH_VOLUME:-remoteagent-codex-auth}
+  common-skills:
+    external: true
+    name: ${REMOTEAGENT_SKILLS_VOLUME:-remoteagent-common-skills}

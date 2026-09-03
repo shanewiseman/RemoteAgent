@@ -1,0 +1,58 @@
+name: remoteagent-__AGENT_ID__
+
+services:
+  agent:
+    image: remoteagent/__AGENT_ID__:${REMOTEAGENT_VERSION:-local}
+    build:
+      context: ..
+      dockerfile: __AGENT_ID__/Dockerfile
+      network: ${REMOTEAGENT_BUILD_NETWORK:-default}
+      args:
+        REMOTEAGENT_VERSION: ${REMOTEAGENT_VERSION:-local}
+    profiles: ["runner"]
+    user: ${REMOTEAGENT_UID:-1000}:${REMOTEAGENT_GID:-1000}
+    environment:
+      CODEX_HOME: /home/agent/.codex
+      REMOTEAGENT_AGENT_ID: __AGENT_ID__
+      REMOTEAGENT_WORKSPACE: /workspace
+      REMOTEAGENT_SESSIONS: /home/agent/.codex/sessions
+      REMOTEAGENT_ARTIFACTS: /workspace/artifacts
+      REMOTEAGENT_SKILLS: /opt/remoteagent/skills
+      REMOTEAGENT_JOB_ID: ${REMOTEAGENT_JOB_ID:-manual-validation}
+      REMOTEAGENT_CONVERSATION_KEY: ${REMOTEAGENT_CONVERSATION_KEY:-manual-validation}
+    volumes:
+      - codex-auth:/home/agent/.codex
+      - ${REMOTEAGENT_SESSIONS_PATH:-../.runtime/empty/sessions}:/home/agent/.codex/sessions
+      - ${REMOTEAGENT_WORKSPACE_PATH:-../.runtime/empty/workspace}:/workspace
+      - ${REMOTEAGENT_ARTIFACTS_PATH:-../.runtime/empty/artifacts}:/workspace/artifacts
+      - common-skills:/opt/remoteagent/skills:ro
+    networks: ["egress"]
+    read_only: true
+    tmpfs: [/tmp:size=64m,mode=1777]
+    cap_drop: ["ALL"]
+    # Both unconfined settings are required for Codex's nested Bubblewrap
+    # sandbox on the supported Linux/Docker host. See docs/security.md.
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined
+      - apparmor=unconfined
+    pids_limit: 256
+    mem_limit: ${REMOTEAGENT_AGENT_MEMORY_LIMIT:-2g}
+    cpus: ${REMOTEAGENT_AGENT_CPU_LIMIT:-2.0}
+    labels:
+      io.remoteagent.managed: "true"
+      io.remoteagent.instance: ${REMOTEAGENT_INSTANCE_ID:-remoteagent}
+      io.remoteagent.agent.id: __AGENT_ID__
+      io.remoteagent.job.id: ${REMOTEAGENT_JOB_ID:-manual-validation}
+      io.remoteagent.conversation.key: ${REMOTEAGENT_CONVERSATION_KEY:-manual-validation}
+
+networks:
+  egress: {}
+
+volumes:
+  codex-auth:
+    external: true
+    name: ${REMOTEAGENT_AUTH_VOLUME:-remoteagent-codex-auth}
+  common-skills:
+    external: true
+    name: ${REMOTEAGENT_SKILLS_VOLUME:-remoteagent-common-skills}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "agent_id": "joke-agent",
+  "response_prefix": "JOKE: ",
+  "minimum_characters": 10,
+  "maximum_characters": 400,
+  "turn_1": "Make exactly one clean joke containing the exact lowercase word telescope and the exact markers {turn_1_marker} and {memory_marker}. Remember the memory marker for later. Output only the joke.",
+  "turn_2": "Make exactly one clean joke containing the exact lowercase word bicycle and the exact marker {turn_2_marker}. Repeat the memory marker from the previous turn, but do not repeat the prior turn marker. Output only the joke."
+}
+

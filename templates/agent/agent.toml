@@ -1,0 +1,22 @@
+schema_version = 1
+id = "__AGENT_ID__"
+name = "__AGENT_NAME__"
+description = "Describe when callers should choose this agent."
+compose_file = "compose.yaml"
+project_name = "remoteagent-__AGENT_ID__"
+runner_service = "agent"
+dependency_services = []
+enabled = true
+config_file = "config.toml"
+base_context_file = "AGENTS.md"
+
+[environment]
+REMOTEAGENT_AGENT_ID = "__AGENT_ID__"
+
+[labels]
+"io.remoteagent.builtin" = "false"
+
+[metadata]
+category = "custom"
+supports_artifacts = true
+

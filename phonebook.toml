@@ -1,0 +1,6 @@
+schema_version = 1
+
+[[agents]]
+id = "joke-agent"
+manifest = "joke-agent/agent.toml"
+enabled = true
