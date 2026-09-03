@@ -1,0 +1,304 @@
+name: ${COMPOSE_PROJECT_NAME:-remoteagent}
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  postgres:
+    <<: *service-defaults
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-remoteagent}
+      POSTGRES_USER: ${POSTGRES_USER:-remoteagent}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /run/postgresql:size=16m,mode=0770,uid=70,gid=70
+      - /tmp:size=32m,mode=1777
+
+  redis:
+    <<: *service-defaults
+    image: redis:7.4.5-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "60"
+      - "1"
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+  router:
+    <<: *service-defaults
+    image: remoteagent/router:${REMOTEAGENT_VERSION:-local}
+    build:
+      context: .
+      dockerfile: runtime/router.Dockerfile
+      network: ${REMOTEAGENT_BUILD_NETWORK:-default}
+      args:
+        REMOTEAGENT_VERSION: ${REMOTEAGENT_VERSION:-local}
+        REMOTEAGENT_UID: ${REMOTEAGENT_UID:-1000}
+        REMOTEAGENT_GID: ${REMOTEAGENT_GID:-1000}
+    environment:
+      REMOTEAGENT_VERSION: ${REMOTEAGENT_VERSION:-local}
+      REMOTEAGENT_ENVIRONMENT: production
+      REMOTEAGENT_INSTANCE_ID: ${REMOTEAGENT_INSTANCE_ID:-remoteagent}
+      REMOTEAGENT_HOST: 0.0.0.0
+      REMOTEAGENT_PORT: 8080
+      REMOTEAGENT_LOG_LEVEL: ${REMOTEAGENT_LOG_LEVEL:-INFO}
+      REMOTEAGENT_AUTH_MODE: ${REMOTEAGENT_AUTH_MODE:-chatgpt}
+      REMOTEAGENT_REPOSITORY_ROOT: ${REMOTEAGENT_REPO_ROOT:?run scripts/remotectl init}
+      REMOTEAGENT_DATA_DIR: ${REMOTEAGENT_STATE_ROOT:?run scripts/remotectl init}
+      REMOTEAGENT_AGENTS_ROOT: ${REMOTEAGENT_REPO_ROOT:?run scripts/remotectl init}
+      REMOTEAGENT_REPO_ROOT: ${REMOTEAGENT_REPO_ROOT:?run scripts/remotectl init}
+      REMOTEAGENT_STATE_ROOT: ${REMOTEAGENT_STATE_ROOT:?run scripts/remotectl init}
+      REMOTEAGENT_PHONEBOOK_PATH: ${REMOTEAGENT_REPO_ROOT:?run scripts/remotectl init}/phonebook.toml
+      REMOTEAGENT_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+      REMOTEAGENT_BEARER_TOKEN_FILE: /run/secrets/router_bearer_token
+      POSTGRES_DB: ${POSTGRES_DB:-remoteagent}
+      POSTGRES_USER: ${POSTGRES_USER:-remoteagent}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      REMOTEAGENT_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REMOTEAGENT_SCHEDULER_CONCURRENCY: ${REMOTEAGENT_SCHEDULER_CONCURRENCY:-4}
+      REMOTEAGENT_JOB_TIMEOUT_SECONDS: ${REMOTEAGENT_JOB_TIMEOUT_SECONDS:-14400}
+      REMOTEAGENT_ARTIFACT_MAX_FILE_BYTES: ${REMOTEAGENT_ARTIFACT_MAX_FILE_BYTES:-104857600}
+      REMOTEAGENT_COMPANION_MAX_OBJECT_BYTES: ${REMOTEAGENT_COMPANION_MAX_OBJECT_BYTES:-104857600}
+      REMOTEAGENT_COMPANION_MAX_FILES_PER_ITEM: ${REMOTEAGENT_COMPANION_MAX_FILES_PER_ITEM:-20000}
+      REMOTEAGENT_COMPANION_MAX_PER_TURN: ${REMOTEAGENT_COMPANION_MAX_PER_TURN:-20}
+      REMOTEAGENT_COMPANION_MAX_ACTIVE_NAMES: ${REMOTEAGENT_COMPANION_MAX_ACTIVE_NAMES:-200}
+      REMOTEAGENT_COMPANION_MAX_CONVERSATION_BYTES: ${REMOTEAGENT_COMPANION_MAX_CONVERSATION_BYTES:-1073741824}
+      REMOTEAGENT_COMPANION_STAGING_MAX_BYTES: ${REMOTEAGENT_COMPANION_STAGING_MAX_BYTES:-5368709120}
+      REMOTEAGENT_COMPANION_STAGE_TTL_SECONDS: ${REMOTEAGENT_COMPANION_STAGE_TTL_SECONDS:-86400}
+      REMOTEAGENT_COMPANION_GIT_WORKERS: ${REMOTEAGENT_COMPANION_GIT_WORKERS:-2}
+      REMOTEAGENT_COMPANION_GIT_TIMEOUT_SECONDS: ${REMOTEAGENT_COMPANION_GIT_TIMEOUT_SECONDS:-300}
+      REMOTEAGENT_DEPENDENCY_WARM_SECONDS: ${REMOTEAGENT_DEPENDENCY_WARM_SECONDS:-900}
+      REMOTEAGENT_AUTH_VOLUME: ${REMOTEAGENT_AUTH_VOLUME:-remoteagent-codex-auth}
+      REMOTEAGENT_SKILLS_VOLUME: ${REMOTEAGENT_SKILLS_VOLUME:-remoteagent-common-skills}
+      REMOTEAGENT_UID: ${REMOTEAGENT_UID:-1000}
+      REMOTEAGENT_GID: ${REMOTEAGENT_GID:-1000}
+      REMOTEAGENT_WORKSPACE_CONTAINER_PATH: /workspace
+      REMOTEAGENT_CODEX_HOME_CONTAINER_PATH: /home/agent/.codex
+      REMOTEAGENT_ARTIFACTS_CONTAINER_PATH: /workspace/artifacts
+      REMOTEAGENT_DASHBOARD_ENABLED: ${REMOTEAGENT_DASHBOARD_ENABLED:-true}
+      REMOTEAGENT_DASHBOARD_ALLOW_HTTP: ${REMOTEAGENT_DASHBOARD_ALLOW_HTTP:-true}
+      REMOTEAGENT_DASHBOARD_DEBUG_ENABLED: ${REMOTEAGENT_DASHBOARD_DEBUG_ENABLED:-false}
+      REMOTEAGENT_DASHBOARD_SESSION_IDLE_SECONDS: ${REMOTEAGENT_DASHBOARD_SESSION_IDLE_SECONDS:-1800}
+      REMOTEAGENT_DASHBOARD_SESSION_ABSOLUTE_SECONDS: ${REMOTEAGENT_DASHBOARD_SESSION_ABSOLUTE_SECONDS:-28800}
+      REMOTEAGENT_MCP_MOUNT_PATH: ${REMOTEAGENT_MCP_PATH:-/mcp}
+      REMOTEAGENT_MCP_ALLOWED_HOSTS: >-
+        ${REMOTEAGENT_MCP_ALLOWED_HOSTS:-["127.0.0.1:*","localhost:*","[::1]:*","router:8080"]}
+      REMOTEAGENT_MCP_ALLOWED_ORIGINS: >-
+        ${REMOTEAGENT_MCP_ALLOWED_ORIGINS:-["http://127.0.0.1:*","http://localhost:*","http://[::1]:*"]}
+      REMOTEAGENT_INITIALIZE_SCHEMA: "false"
+      REMOTEAGENT_AUTO_MIGRATE: "true"
+      REMOTEAGENT_CRON_MCP_BEARER_TOKEN_FILE: /run/secrets/cron_mcp_token
+      REMOTEAGENT_CRON_API_BEARER_TOKEN_FILE: /run/secrets/cron_api_token
+      REMOTEAGENT_CRON_API_URL: http://cron:8090
+      DOCKER_HOST: unix:///var/run/docker.sock
+    secrets:
+      - postgres_password
+      - router_bearer_token
+      - cron_mcp_token
+      - cron_api_token
+    volumes:
+      # The Docker API is root-equivalent. See docs/security.md before exposing
+      # this service beyond a trusted internal network.
+      - type: bind
+        source: ${REMOTEAGENT_DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /var/run/docker.sock
+      # Same-path mounts are deliberate: child Compose bind paths are evaluated
+      # by the host Docker daemon, not inside this container.
+      - type: bind
+        source: ${REMOTEAGENT_REPO_ROOT:?run scripts/remotectl init}
+        target: ${REMOTEAGENT_REPO_ROOT:?run scripts/remotectl init}
+        read_only: true
+      - type: bind
+        source: ${REMOTEAGENT_STATE_ROOT:?run scripts/remotectl init}
+        target: ${REMOTEAGENT_STATE_ROOT:?run scripts/remotectl init}
+      - router-data:/var/lib/remoteagent
+    group_add:
+      - ${REMOTEAGENT_DOCKER_GID:-998}
+    user: ${REMOTEAGENT_UID:-1000}:${REMOTEAGENT_GID:-1000}
+    networks:
+      - edge
+      - backend
+    ports:
+      - ${REMOTEAGENT_BIND_ADDRESS:-0.0.0.0}:${REMOTEAGENT_PORT:-8080}:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+
+  cron:
+    <<: *service-defaults
+    image: remoteagent/cron:${REMOTEAGENT_VERSION:-local}
+    build:
+      context: .
+      dockerfile: runtime/cron.Dockerfile
+      network: ${REMOTEAGENT_BUILD_NETWORK:-default}
+      args:
+        REMOTEAGENT_VERSION: ${REMOTEAGENT_VERSION:-local}
+        REMOTEAGENT_UID: ${REMOTEAGENT_UID:-1000}
+        REMOTEAGENT_GID: ${REMOTEAGENT_GID:-1000}
+    environment:
+      REMOTEAGENT_VERSION: ${REMOTEAGENT_VERSION:-local}
+      REMOTEAGENT_CRON_VERSION: ${REMOTEAGENT_VERSION:-local}
+      REMOTEAGENT_CRON_ENVIRONMENT: production
+      REMOTEAGENT_CRON_HOST: 0.0.0.0
+      REMOTEAGENT_CRON_PORT: 8090
+      REMOTEAGENT_CRON_LOG_LEVEL: ${REMOTEAGENT_CRON_LOG_LEVEL:-INFO}
+      REMOTEAGENT_CRON_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+      REMOTEAGENT_CRON_INTERNAL_BEARER_TOKEN_FILE: /run/secrets/cron_api_token
+      REMOTEAGENT_CRON_ROUTER_MCP_TOKEN_FILE: /run/secrets/cron_mcp_token
+      REMOTEAGENT_CRON_ROUTER_MCP_URL: http://router:8080/mcp
+      REMOTEAGENT_CRON_ROUTER_REQUEST_TIMEOUT_SECONDS: ${REMOTEAGENT_CRON_ROUTER_REQUEST_TIMEOUT_SECONDS:-30}
+      REMOTEAGENT_CRON_AUTO_MIGRATE: "true"
+      REMOTEAGENT_CRON_INITIALIZE_SCHEMA: "false"
+      REMOTEAGENT_CRON_TICK_SECONDS: ${REMOTEAGENT_CRON_TICK_SECONDS:-1}
+      REMOTEAGENT_CRON_JOB_POLL_SECONDS: ${REMOTEAGENT_CRON_JOB_POLL_SECONDS:-5}
+      REMOTEAGENT_CRON_RETRY_INITIAL_SECONDS: ${REMOTEAGENT_CRON_RETRY_INITIAL_SECONDS:-0.5}
+      REMOTEAGENT_CRON_RETRY_MAX_SECONDS: ${REMOTEAGENT_CRON_RETRY_MAX_SECONDS:-30}
+      REMOTEAGENT_CRON_LEASE_SECONDS: ${REMOTEAGENT_CRON_LEASE_SECONDS:-300}
+      REMOTEAGENT_CRON_RESPONSE_RETENTION_SECONDS: ${REMOTEAGENT_CRON_RESPONSE_RETENTION_SECONDS:-7776000}
+      REMOTEAGENT_CRON_ACK_TOMBSTONE_SECONDS: ${REMOTEAGENT_CRON_ACK_TOMBSTONE_SECONDS:-86400}
+      REMOTEAGENT_CRON_RESPONSE_BATCH_LIMIT: ${REMOTEAGENT_CRON_RESPONSE_BATCH_LIMIT:-50}
+      REMOTEAGENT_CRON_RESPONSE_BATCH_BYTES: ${REMOTEAGENT_CRON_RESPONSE_BATCH_BYTES:-4194304}
+      REMOTEAGENT_CRON_RUN_TIMEOUT_SECONDS: ${REMOTEAGENT_CRON_RUN_TIMEOUT_SECONDS:-86400}
+      REMOTEAGENT_CRON_EXECUTION_RETENTION_SECONDS: ${REMOTEAGENT_CRON_EXECUTION_RETENTION_SECONDS:-2592000}
+      REMOTEAGENT_CRON_CLEANUP_INTERVAL_SECONDS: ${REMOTEAGENT_CRON_CLEANUP_INTERVAL_SECONDS:-3600}
+      REMOTEAGENT_CRON_SCHEDULER_ENABLED: "true"
+      POSTGRES_DB: ${POSTGRES_DB:-remoteagent}
+      POSTGRES_USER: ${POSTGRES_USER:-remoteagent}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    secrets:
+      - postgres_password
+      - cron_mcp_token
+      - cron_api_token
+    user: ${REMOTEAGENT_UID:-1000}:${REMOTEAGENT_GID:-1000}
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      router:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; token = open('/run/secrets/cron_api_token', encoding='utf-8').read().strip(); request = urllib.request.Request('http://127.0.0.1:8090/readyz', headers={'Authorization': f'Bearer {token}'}); urllib.request.urlopen(request, timeout=3).read()"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=64m,mode=1777,nosuid,nodev,noexec
+
+  codex-auth:
+    image: remoteagent/agent-base:${REMOTEAGENT_VERSION:-local}
+    build:
+      context: .
+      dockerfile: runtime/agent.Dockerfile
+      network: ${REMOTEAGENT_BUILD_NETWORK:-default}
+      args:
+        REMOTEAGENT_VERSION: ${REMOTEAGENT_VERSION:-local}
+        REMOTEAGENT_UID: ${REMOTEAGENT_UID:-1000}
+        REMOTEAGENT_GID: ${REMOTEAGENT_GID:-1000}
+    profiles: ["tools"]
+    entrypoint: ["codex"]
+    command: ["login", "status"]
+    environment:
+      CODEX_HOME: /home/agent/.codex
+    volumes:
+      - codex-auth:/home/agent/.codex
+      - common-skills:/opt/remoteagent/skills
+    stdin_open: true
+    tty: true
+    networks:
+      - edge
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  edge:
+    name: ${COMPOSE_PROJECT_NAME:-remoteagent}-edge
+  backend:
+    name: ${COMPOSE_PROJECT_NAME:-remoteagent}-backend
+    internal: true
+
+volumes:
+  postgres-data:
+    name: ${COMPOSE_PROJECT_NAME:-remoteagent}-postgres-data
+  redis-data:
+    name: ${COMPOSE_PROJECT_NAME:-remoteagent}-redis-data
+  router-data:
+    name: ${COMPOSE_PROJECT_NAME:-remoteagent}-router-data
+  codex-auth:
+    name: ${REMOTEAGENT_AUTH_VOLUME:-remoteagent-codex-auth}
+  common-skills:
+    name: ${REMOTEAGENT_SKILLS_VOLUME:-remoteagent-common-skills}
+
+secrets:
+  postgres_password:
+    file: ${REMOTEAGENT_STATE_ROOT:?run scripts/remotectl init}/secrets/postgres_password
+  router_bearer_token:
+    file: ${REMOTEAGENT_STATE_ROOT:?run scripts/remotectl init}/secrets/router_bearer_token
+  cron_mcp_token:
+    file: ${REMOTEAGENT_STATE_ROOT:?run scripts/remotectl init}/secrets/cron_mcp_token
+  cron_api_token:
+    file: ${REMOTEAGENT_STATE_ROOT:?run scripts/remotectl init}/secrets/cron_api_token

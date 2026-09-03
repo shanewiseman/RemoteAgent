@@ -1,0 +1,38 @@
+# This managed policy is baked into the runner image. Codex loads
+# /etc/codex/requirements.toml before user or agent configuration, so an agent
+# cannot weaken these restrictions through its mutable config revision.
+cli_auth_credentials_store = "file"
+chatgpt_base_url = "https://chatgpt.com/backend-api/"
+allowed_approval_policies = ["never"]
+allowed_sandbox_modes = ["read-only", "workspace-write"]
+allow_login_shell = false
+allow_managed_hooks_only = true
+allow_appshots = false
+allow_remote_control = false
+
+# An empty managed allowlist disables config- and plugin-provided MCP servers.
+# MCP processes run beside Codex rather than inside the local command sandbox.
+[mcp_servers]
+
+# These integrations can launch host-side processes or read files outside the
+# command sandbox. RemoteAgent V1 deliberately exposes only sandboxed local
+# tools plus Codex-owned model/web traffic.
+[features]
+apps = false
+enable_mcp_apps = false
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+hooks = false
+code_mode = false
+code_mode_host = false
+browser_use = false
+browser_use_full_cdp_access = false
+browser_use_external = false
+computer_use = false
+image_generation = false
+skill_mcp_dependency_install = false
+recommended_plugins = false
+
+[permissions.filesystem]
+deny_read = ["/home/agent/.codex/*auth*"]

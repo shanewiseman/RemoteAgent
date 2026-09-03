@@ -1,0 +1,9 @@
+# File-backed credentials are required because the authentication helper and
+# short-lived runners share a named CODEX_HOME volume.
+cli_auth_credentials_store = "file"
+
+# Agent runs are non-interactive. Individual agent manifests may further reduce
+# the sandbox; the router supplies explicit flags for each execution.
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
