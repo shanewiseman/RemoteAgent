@@ -1,0 +1,1842 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 077
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ENV_FILE="${REMOTEAGENT_ENV_FILE:-${ROOT_DIR}/.env}"
+PROJECT_NAME=""
+JSON_OUTPUT=0
+LOCK_HELD=0
+RESTART_ROUTER_ON_EXIT=0
+RESTART_CRON_ON_EXIT=0
+
+die() {
+    printf 'remoteagent: %s\n' "$*" >&2
+    exit 1
+}
+
+warn() {
+    printf 'remoteagent: warning: %s\n' "$*" >&2
+}
+
+note() {
+    printf 'remoteagent: %s\n' "$*" >&2
+}
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/remotectl [--env-file PATH] [--project NAME] [--json] COMMAND ...
+
+First use:
+  init [--non-interactive]       Create .env, runtime directories, and secrets
+  bootstrap [--non-interactive]  Initialize, build, authenticate, and start
+  validate [--agent ID|--all]    Validate deployment and agent definitions
+  doctor                         Run read-only host/deployment diagnostics
+
+Images and authentication:
+  build [core|all] [build flags]
+  auth login [--method chatgpt|api] [--browser] [--key-file PATH]
+  auth import --file PATH | auth status | auth logout --yes
+  token status [router|cron|cron-mcp|cron-api|all]
+  token print [router|cron-mcp|cron-api]
+  token rotate [router|cron|cron-mcp|cron-api|all] --yes
+  skills sync [--prune --yes]
+
+Lifecycle:
+  start [--build] [--wait SECONDS]
+  stop [--wait SECONDS] [--force]
+  restart [--wait SECONDS]
+  down [--wait SECONDS] [--force]
+  status
+  logs [SERVICE] [--follow] [--since DURATION] [--tail N]
+  migrate status [router|cron|all] | migrate apply [router|cron|all]
+
+Agents and smoke tests:
+  agent list
+  agent new ID [--name NAME]
+  agent validate ID|--all
+  agent build ID|--all [build flags]
+  agent register ID [--replace]
+  smoke live [--agent ID] [--timeout SECONDS] [--keep]
+
+Maintenance:
+  backup create [--output PATH]
+  backup verify FILE
+  restore FILE --yes
+  cleanup [--apply --yes] [--older-than DAYS]
+  upgrade check | upgrade apply --yes
+
+Destructive commands require an explicit --yes. `down` never removes volumes.
+EOF
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+is_ci() {
+    [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" || -n "${GITLAB_CI:-}" || -n "${BUILDKITE:-}" || -n "${TF_BUILD:-}" ]]
+}
+
+load_env() {
+    [[ -f "$ENV_FILE" ]] || die "missing ${ENV_FILE}; run scripts/remotectl init"
+    set -a
+    # This is an operator-owned deployment file, not caller input.
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+    PROJECT_NAME="${PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-remoteagent}}"
+}
+
+compose() {
+    docker compose --env-file "$ENV_FILE" --project-name "$PROJECT_NAME" -f "$ROOT_DIR/compose.yaml" "$@"
+}
+
+router_running() {
+    compose ps --status running --quiet router 2>/dev/null | grep -q .
+}
+
+cron_running() {
+    compose ps --status running --quiet cron 2>/dev/null | grep -q .
+}
+
+restart_router_exit_guard() {
+    local status=$?
+    trap - EXIT
+    if (( RESTART_ROUTER_ON_EXIT )); then
+        note "restarting router after maintenance window"
+        compose up -d --wait router || warn "router restart failed; run scripts/remotectl start"
+    fi
+    if (( RESTART_CRON_ON_EXIT )); then
+        note "restarting cron after maintenance window"
+        compose up -d --wait cron || warn "cron restart failed; run scripts/remotectl start"
+    fi
+    exit "$status"
+}
+
+require_router_idle() {
+    local status body
+    for status in queued provisioning waiting_for_lease running collecting; do
+        body=$(api GET "/api/v1/jobs?status=${status}&limit=1") \
+            || die "cannot verify router job state before maintenance"
+        python3 - "$status" "$body" <<'PY'
+import json
+import sys
+
+status = sys.argv[1]
+try:
+    jobs = json.loads(sys.argv[2])
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"invalid job-list response while checking {status}: {exc}") from exc
+if not isinstance(jobs, list):
+    raise SystemExit(f"unexpected job-list response while checking {status}")
+if jobs:
+    raise SystemExit(
+        f"router has {status} work; wait for it to finish or cancel it before maintenance"
+    )
+PY
+    done
+}
+
+agent_compose() {
+    local agent_id=$1
+    shift
+    docker compose --env-file "$ENV_FILE" --project-name "remoteagent-${agent_id}" \
+        -f "$ROOT_DIR/${agent_id}/compose.yaml" --profile runner "$@"
+}
+
+agent_service_names() {
+    local agent_id=$1
+    python3 - "$ROOT_DIR/$agent_id/agent.toml" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+with pathlib.Path(sys.argv[1]).open("rb") as handle:
+    manifest = tomllib.load(handle)
+print(manifest["runner_service"])
+for service in manifest.get("dependency_services", []):
+    print(service)
+PY
+}
+
+require_router_stopped_for_auth_mutation() {
+    if router_running; then
+        die "stop the router before changing shared Codex credentials; active jobs may be using them"
+    fi
+}
+
+state_root() {
+    printf '%s' "${REMOTEAGENT_STATE_ROOT:-${ROOT_DIR}/.runtime}"
+}
+
+secret_path() {
+    printf '%s/secrets/%s' "$(state_root)" "$1"
+}
+
+router_url() {
+    printf 'http://127.0.0.1:%s' "${REMOTEAGENT_PORT:-8080}"
+}
+
+router_token() {
+    local path
+    path=$(secret_path router_bearer_token)
+    [[ -r "$path" ]] || die "router bearer token is not readable: $path"
+    tr -d '\r\n' < "$path"
+}
+
+api() {
+    local method=$1
+    local path=$2
+    shift 2
+    local token
+    token=$(router_token)
+    curl --fail --silent --show-error --request "$method" \
+        --header "Authorization: Bearer ${token}" \
+        --header 'Content-Type: application/json' \
+        "$(router_url)${path}" "$@"
+}
+
+random_hex() {
+    local bytes=${1:-32}
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex "$bytes"
+    else
+        od -An -N "$bytes" -tx1 /dev/urandom | tr -d ' \n'
+    fi
+}
+
+upsert_env() {
+    local key=$1
+    local value=$2
+    local temp
+    temp=$(mktemp "${ENV_FILE}.tmp.XXXXXX")
+    awk -v key="$key" -v value="$value" '
+        BEGIN { found = 0 }
+        $0 ~ "^" key "=" { print key "=" value; found = 1; next }
+        { print }
+        END { if (!found) print key "=" value }
+    ' "$ENV_FILE" > "$temp"
+    chmod 0600 "$temp"
+    mv -f "$temp" "$ENV_FILE"
+}
+
+lock_mutation() {
+    (( LOCK_HELD == 0 )) || return 0
+    local lock_dir
+    lock_dir="$(state_root)/locks"
+    mkdir -p "$lock_dir"
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"${lock_dir}/admin.lock"
+        flock -n 9 || die "another RemoteAgent administrative command is running"
+    fi
+    LOCK_HELD=1
+}
+
+check_secret_mode() {
+    local path=$1
+    secret_mode_valid "$path" || die "secret file must exist and not be group/world accessible: $path"
+}
+
+configure_mcp_allowlists() {
+    require_command python3
+    local short_name fqdn addresses rendered allowed_hosts allowed_origins
+    short_name=$(hostname 2>/dev/null || true)
+    fqdn=$(hostname -f 2>/dev/null || true)
+    addresses=$(hostname -I 2>/dev/null || true)
+    rendered=$(python3 - \
+        "${REMOTEAGENT_MCP_ALLOWED_HOSTS:-[]}" \
+        "${REMOTEAGENT_MCP_ALLOWED_ORIGINS:-[]}" \
+        "${REMOTEAGENT_PORT:-8080}" \
+        "$short_name" "$fqdn" "$addresses" <<'PY'
+import ipaddress
+import json
+import sys
+
+
+def load_list(raw: str, name: str) -> list[str]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{name} must be a JSON list: {exc}") from exc
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"{name} must be a JSON list of strings")
+    return value
+
+
+hosts = load_list(sys.argv[1], "REMOTEAGENT_MCP_ALLOWED_HOSTS")
+origins = load_list(sys.argv[2], "REMOTEAGENT_MCP_ALLOWED_ORIGINS")
+port, short_name, fqdn, address_text = sys.argv[3:]
+
+
+def append_unique(values: list[str], item: str) -> None:
+    if item and item not in values:
+        values.append(item)
+
+
+for item in ("127.0.0.1:*", "localhost:*", "[::1]:*", "router:8080"):
+    append_unique(hosts, item)
+for item in ("http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"):
+    append_unique(origins, item)
+
+for name in (short_name, fqdn):
+    name = name.strip().lower().rstrip(".")
+    if name and name != "localhost":
+        append_unique(hosts, f"{name}:{port}")
+        append_unique(origins, f"http://{name}:{port}")
+
+for raw in address_text.split():
+    try:
+        address = ipaddress.ip_address(raw.split("%", 1)[0])
+    except ValueError:
+        continue
+    if address.is_loopback:
+        continue
+    rendered_address = f"[{address}]" if address.version == 6 else str(address)
+    append_unique(hosts, f"{rendered_address}:{port}")
+    append_unique(origins, f"http://{rendered_address}:{port}")
+
+print(json.dumps(hosts, separators=(",", ":")))
+print(json.dumps(origins, separators=(",", ":")))
+PY
+)
+    allowed_hosts=${rendered%%$'\n'*}
+    allowed_origins=${rendered#*$'\n'}
+    upsert_env REMOTEAGENT_MCP_ALLOWED_HOSTS "'${allowed_hosts}'"
+    upsert_env REMOTEAGENT_MCP_ALLOWED_ORIGINS "'${allowed_origins}'"
+}
+
+secret_mode_valid() {
+    local path=$1
+    local mode
+    [[ -s "$path" ]] || return 1
+    mode=$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path")
+    (( (8#$mode & 8#077) == 0 ))
+}
+
+service_tokens_independent() {
+    local router_path cron_mcp_path cron_api_path
+    router_path=$(secret_path router_bearer_token)
+    cron_mcp_path=$(secret_path cron_mcp_token)
+    cron_api_path=$(secret_path cron_api_token)
+    secret_mode_valid "$router_path" \
+        && secret_mode_valid "$cron_mcp_path" \
+        && secret_mode_valid "$cron_api_path" \
+        && ! cmp -s "$router_path" "$cron_mcp_path" \
+        && ! cmp -s "$router_path" "$cron_api_path" \
+        && ! cmp -s "$cron_mcp_path" "$cron_api_path"
+}
+
+require_independent_service_tokens() {
+    service_tokens_independent \
+        || die "router, cron MCP, and cron API bearer tokens must be non-empty and independent"
+}
+
+init_deployment() {
+    local non_interactive=0
+    while (($#)); do
+        case "$1" in
+            --non-interactive) non_interactive=1 ;;
+            *) die "unknown init option: $1" ;;
+        esac
+        shift
+    done
+
+    require_command docker
+    if [[ ! -f "$ENV_FILE" ]]; then
+        cp "$ROOT_DIR/.env.example" "$ENV_FILE"
+        chmod 0600 "$ENV_FILE"
+        note "created ${ENV_FILE}"
+    fi
+
+    local repo_root runtime_root docker_socket docker_gid
+    repo_root=$ROOT_DIR
+    runtime_root="${ROOT_DIR}/.runtime"
+    docker_socket=${REMOTEAGENT_DOCKER_SOCKET:-/var/run/docker.sock}
+    docker_gid=998
+    if [[ -S "$docker_socket" ]]; then
+        docker_gid=$(stat -c '%g' "$docker_socket" 2>/dev/null || stat -f '%g' "$docker_socket")
+    fi
+
+    upsert_env REMOTEAGENT_REPO_ROOT "$repo_root"
+    upsert_env REMOTEAGENT_STATE_ROOT "$runtime_root"
+    upsert_env REMOTEAGENT_DOCKER_SOCKET "$docker_socket"
+    upsert_env REMOTEAGENT_DOCKER_GID "$docker_gid"
+    upsert_env REMOTEAGENT_UID "$(id -u)"
+    upsert_env REMOTEAGENT_GID "$(id -g)"
+    # Migrate the sole retired generated default without touching any other
+    # operator-selected timeout.
+    if grep -qx 'REMOTEAGENT_JOB_TIMEOUT_SECONDS=1800' "$ENV_FILE"; then
+        upsert_env REMOTEAGENT_JOB_TIMEOUT_SECONDS 14400
+    fi
+
+    load_env
+    if ! grep -q '^REMOTEAGENT_INSTANCE_ID=' "$ENV_FILE"; then
+        upsert_env REMOTEAGENT_INSTANCE_ID "${COMPOSE_PROJECT_NAME:-remoteagent}"
+        load_env
+    fi
+    configure_mcp_allowlists
+    load_env
+    lock_mutation
+    local runtime_dirs=(
+        "$(state_root)/secrets"
+        "$(state_root)/locks"
+        "$(state_root)/conversations"
+        "$(state_root)/artifact-store"
+        "$(state_root)/backups"
+        "$(state_root)/empty/workspace"
+        "$(state_root)/empty/sessions"
+        "$(state_root)/empty/artifacts"
+    )
+    mkdir -p "${runtime_dirs[@]}"
+    chmod 0700 "$(state_root)" "$(state_root)/secrets" "$(state_root)/locks"
+
+    local token_file password_file cron_mcp_file cron_api_file
+    token_file=$(secret_path router_bearer_token)
+    password_file=$(secret_path postgres_password)
+    cron_mcp_file=$(secret_path cron_mcp_token)
+    cron_api_file=$(secret_path cron_api_token)
+    if [[ ! -s "$token_file" ]]; then
+        random_hex 32 > "$token_file"
+        chmod 0600 "$token_file"
+        note "generated router bearer token at ${token_file}"
+    fi
+    if [[ ! -s "$password_file" ]]; then
+        random_hex 32 > "$password_file"
+        chmod 0600 "$password_file"
+        note "generated PostgreSQL password"
+    fi
+    if [[ ! -s "$cron_mcp_file" ]]; then
+        random_hex 32 > "$cron_mcp_file"
+        chmod 0600 "$cron_mcp_file"
+        note "generated scoped cron MCP token"
+    fi
+    if [[ ! -s "$cron_api_file" ]]; then
+        random_hex 32 > "$cron_api_file"
+        chmod 0600 "$cron_api_file"
+        note "generated cron internal API token"
+    fi
+
+    check_secret_mode "$token_file"
+    check_secret_mode "$password_file"
+    check_secret_mode "$cron_mcp_file"
+    check_secret_mode "$cron_api_file"
+    require_independent_service_tokens
+    validate_phonebook
+
+    if (( non_interactive == 0 )); then
+        note "initialization complete; the bearer token remains in ${token_file}"
+    fi
+}
+
+find_agent_ids() {
+    local manifest
+    while IFS= read -r -d '' manifest; do
+        basename "$(dirname "$manifest")"
+    done < <(find "$ROOT_DIR" -mindepth 2 -maxdepth 2 -name agent.toml -type f -print0 | sort -z)
+}
+
+validate_phonebook() {
+    local path="$ROOT_DIR/phonebook.toml"
+    [[ -f "$path" && ! -L "$path" ]] || die "missing or unsafe seed phonebook: $path"
+    require_command python3
+    python3 - "$path" "$ROOT_DIR" <<'PY'
+import pathlib
+import re
+import sys
+import tomllib
+
+path = pathlib.Path(sys.argv[1])
+repository = pathlib.Path(sys.argv[2]).resolve()
+with path.open("rb") as handle:
+    document = tomllib.load(handle)
+entries = document.get("agents")
+if not isinstance(entries, list):
+    raise SystemExit(f"{path}: agents must be an array of tables")
+seen: set[str] = set()
+for entry in entries:
+    if not isinstance(entry, dict):
+        raise SystemExit(f"{path}: every agent entry must be a table")
+    agent_id = entry.get("id")
+    manifest = entry.get("manifest")
+    unexpected = sorted(set(entry) - {"id", "manifest", "enabled"})
+    if unexpected:
+        raise SystemExit(
+            f"{path}: unsupported fields for {agent_id!r}: {', '.join(unexpected)}"
+        )
+    if not isinstance(agent_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", agent_id):
+        raise SystemExit(f"{path}: invalid agent id {agent_id!r}")
+    if agent_id in seen:
+        raise SystemExit(f"{path}: duplicate agent id {agent_id!r}")
+    seen.add(agent_id)
+    if not isinstance(manifest, str):
+        raise SystemExit(f"{path}: {agent_id!r} requires a manifest reference")
+    if "enabled" in entry and not isinstance(entry["enabled"], bool):
+        raise SystemExit(f"{path}: enabled for {agent_id!r} must be a boolean")
+    requested = pathlib.Path(manifest)
+    if requested not in (pathlib.Path(agent_id) / requested.name, pathlib.Path(requested.name)):
+        raise SystemExit(f"{path}: manifest for {agent_id!r} must stay in its agent folder")
+    manifest_path = (repository / agent_id / requested.name).resolve()
+    agent_root = (repository / agent_id).resolve()
+    try:
+        manifest_path.relative_to(agent_root)
+    except ValueError as exc:
+        raise SystemExit(f"{path}: manifest for {agent_id!r} escapes its agent folder") from exc
+    if not manifest_path.is_file():
+        raise SystemExit(f"{path}: missing manifest {manifest_path}")
+    with manifest_path.open("rb") as handle:
+        values = tomllib.load(handle)
+    values = values.get("agent", values)
+    if not isinstance(values, dict) or values.get("id") != agent_id:
+        raise SystemExit(f"{path}: {agent_id!r} does not match its manifest")
+PY
+}
+
+validate_agent() {
+    local agent_id=$1
+    local agent_dir="$ROOT_DIR/$agent_id"
+    [[ "$agent_id" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die "invalid agent id: $agent_id"
+    [[ -d "$agent_dir" && ! -L "$agent_dir" ]] || die "agent directory is missing or a symlink: $agent_dir"
+    [[ -f "$agent_dir/agent.toml" ]] || die "missing $agent_dir/agent.toml"
+    [[ -f "$agent_dir/compose.yaml" ]] || die "missing $agent_dir/compose.yaml"
+    [[ -f "$agent_dir/Dockerfile" ]] || die "missing $agent_dir/Dockerfile"
+    [[ -f "$agent_dir/AGENTS.md" ]] || die "missing $agent_dir/AGENTS.md"
+
+    require_command python3
+    local required_output
+    required_output=$(python3 - "$agent_dir/agent.toml" "$agent_id" <<'PY'
+import pathlib
+import re
+import sys
+import tomllib
+
+path = pathlib.Path(sys.argv[1])
+expected_id = sys.argv[2]
+agent_root = path.parent.resolve()
+with path.open("rb") as handle:
+    manifest = tomllib.load(handle)
+required = {"id", "name", "description", "compose_file", "runner_service", "enabled"}
+missing = sorted(required - manifest.keys())
+if missing:
+    raise SystemExit(f"{path}: missing fields: {', '.join(missing)}")
+allowed = required | {
+    "schema_version",
+    "project_name",
+    "dependency_services",
+    "config_file",
+    "base_context_file",
+    "environment",
+    "labels",
+    "metadata",
+}
+extra = sorted(set(manifest) - allowed)
+if extra:
+    raise SystemExit(f"{path}: unsupported fields: {', '.join(extra)}")
+if manifest["id"] != expected_id:
+    raise SystemExit(f"{path}: id must match directory name {expected_id!r}")
+if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", manifest["id"]):
+    raise SystemExit(f"{path}: invalid agent id")
+if not isinstance(manifest["name"], str) or not 1 <= len(manifest["name"]) <= 128:
+    raise SystemExit(f"{path}: name must contain 1-128 characters")
+if not isinstance(manifest["description"], str) or len(manifest["description"]) > 4096:
+    raise SystemExit(f"{path}: description must be text no longer than 4096 characters")
+if not isinstance(manifest["enabled"], bool):
+    raise SystemExit(f"{path}: enabled must be a boolean")
+project_name = manifest.get("project_name", f"remoteagent-{expected_id}")
+if project_name != f"remoteagent-{expected_id}":
+    raise SystemExit(f"{path}: project_name must be 'remoteagent-{expected_id}'")
+service_re = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
+runner = manifest["runner_service"]
+if not isinstance(runner, str) or not service_re.fullmatch(runner):
+    raise SystemExit(f"{path}: invalid runner_service")
+dependencies = manifest.get("dependency_services", [])
+if not isinstance(dependencies, list) or not all(
+    isinstance(value, str) and service_re.fullmatch(value) for value in dependencies
+):
+    raise SystemExit(f"{path}: dependency_services must be a list of Compose service names")
+if len(set(dependencies)) != len(dependencies):
+    raise SystemExit(f"{path}: dependency_services must not contain duplicates")
+if runner in dependencies:
+    raise SystemExit(f"{path}: runner_service cannot also be a dependency")
+
+for table in ("environment", "labels"):
+    values = manifest.get(table, {})
+    if not isinstance(values, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in values.items()
+    ):
+        raise SystemExit(f"{path}: {table} must contain string keys and values")
+if not isinstance(manifest.get("metadata", {}), dict):
+    raise SystemExit(f"{path}: metadata must be a table")
+reserved = {
+    "DATABASE_URL",
+    "DOCKER_CONFIG",
+    "DOCKER_CONTEXT",
+    "DOCKER_HOST",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "REMOTEAGENT_AGENT_CPU_LIMIT",
+    "REMOTEAGENT_AGENT_MEMORY_LIMIT",
+    "REMOTEAGENT_ARTIFACTS_PATH",
+    "REMOTEAGENT_AUTH_VOLUME",
+    "REMOTEAGENT_BEARER_TOKEN",
+    "REMOTEAGENT_CONVERSATION_KEY",
+    "REMOTEAGENT_DATABASE_URL",
+    "REMOTEAGENT_GID",
+    "REMOTEAGENT_INSTANCE_ID",
+    "REMOTEAGENT_JOB_ID",
+    "REMOTEAGENT_SESSIONS_PATH",
+    "REMOTEAGENT_SKILLS_VOLUME",
+    "REMOTEAGENT_UID",
+    "REMOTEAGENT_VERSION",
+    "REMOTEAGENT_WORKSPACE_PATH",
+    "ROUTER_BEARER_TOKEN",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TMPDIR",
+}
+environment = manifest.get("environment", {})
+for name in environment:
+    if name in reserved or name.startswith("DOCKER_"):
+        raise SystemExit(f"{path}: environment uses controller-reserved key {name!r}")
+
+for field in ("compose_file", "config_file", "base_context_file"):
+    value = manifest.get(field)
+    if value:
+        if not isinstance(value, str):
+            raise SystemExit(f"{path}: {field} must be a relative path")
+        candidate = (agent_root / value).resolve()
+        try:
+            candidate.relative_to(agent_root)
+        except ValueError:
+            raise SystemExit(f"{path}: {field} escapes agent directory")
+        if not candidate.is_file():
+            raise SystemExit(f"{path}: {field} does not exist: {value}")
+if pathlib.Path(manifest["compose_file"]) != pathlib.Path("compose.yaml"):
+    raise SystemExit(f"{path}: compose_file must be 'compose.yaml' for remotectl")
+
+config_file = manifest.get("config_file")
+if config_file:
+    config_path = agent_root / config_file
+    with config_path.open("rb") as handle:
+        config = tomllib.load(handle)
+    if config.get("cli_auth_credentials_store") != "file":
+        raise SystemExit(f"{config_path}: cli_auth_credentials_store must be 'file'")
+    if config.get("approval_policy") != "never":
+        raise SystemExit(f"{config_path}: approval_policy must be 'never' for background jobs")
+    if config.get("sandbox_mode") not in {"read-only", "workspace-write"}:
+        raise SystemExit(
+            f"{config_path}: sandbox_mode must be 'read-only' or 'workspace-write'"
+        )
+    safe_keys = {
+        "approval_policy",
+        "cli_auth_credentials_store",
+        "compact_prompt",
+        "developer_instructions",
+        "disable_response_storage",
+        "hide_agent_reasoning",
+        "model",
+        "model_auto_compact_token_limit",
+        "model_context_window",
+        "model_reasoning_effort",
+        "model_reasoning_summary",
+        "model_verbosity",
+        "personality",
+        "plan_mode_reasoning_effort",
+        "review_model",
+        "sandbox_mode",
+        "service_tier",
+        "show_raw_agent_reasoning",
+        "tool_output_token_limit",
+        "tool_output_token_max_bytes",
+        "web_search",
+    }
+    unsupported = sorted(set(config) - safe_keys)
+    if unsupported:
+        raise SystemExit(
+            f"{config_path}: unsupported or unsafe Codex config keys: "
+            + ", ".join(unsupported)
+        )
+    structured = sorted(
+        key for key, value in config.items() if isinstance(value, (dict, list))
+    )
+    if structured:
+        raise SystemExit(
+            f"{config_path}: structured Codex config keys are not allowed: "
+            + ", ".join(structured)
+        )
+
+context_file = manifest.get("base_context_file")
+if context_file:
+    context = (agent_root / context_file).read_text(encoding="utf-8")
+    if len(context) > 1_000_000:
+        raise SystemExit(f"{path}: base context exceeds 1,000,000 characters")
+
+print(runner)
+for dependency in dependencies:
+    print(dependency)
+PY
+)
+
+    local services_output required_service
+    services_output=$( \
+        REMOTEAGENT_JOB_ID=validation \
+        REMOTEAGENT_CONVERSATION_KEY=validation \
+        REMOTEAGENT_WORKSPACE_PATH="$(state_root)/empty/workspace" \
+        REMOTEAGENT_SESSIONS_PATH="$(state_root)/empty/sessions" \
+        REMOTEAGENT_ARTIFACTS_PATH="$(state_root)/empty/artifacts" \
+            agent_compose "$agent_id" config --services
+    )
+    while IFS= read -r required_service; do
+        [[ -z "$required_service" ]] && continue
+        grep -Fxq "$required_service" <<<"$services_output" \
+            || die "agent ${agent_id}: Compose service is missing: ${required_service}"
+    done <<<"$required_output"
+
+    local compose_model
+    compose_model=$( \
+        REMOTEAGENT_JOB_ID=validation \
+        REMOTEAGENT_CONVERSATION_KEY=validation \
+        REMOTEAGENT_WORKSPACE_PATH="$(state_root)/empty/workspace" \
+        REMOTEAGENT_SESSIONS_PATH="$(state_root)/empty/sessions" \
+        REMOTEAGENT_ARTIFACTS_PATH="$(state_root)/empty/artifacts" \
+            agent_compose "$agent_id" config --format json
+    )
+    python3 - "$agent_dir/agent.toml" 3<<<"$compose_model" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import tomllib
+
+with pathlib.Path(sys.argv[1]).open("rb") as handle:
+    manifest = tomllib.load(handle)
+with os.fdopen(3, encoding="utf-8") as handle:
+    model = json.load(handle)
+services = model.get("services")
+if not isinstance(services, dict):
+    raise SystemExit(f"{sys.argv[1]}: Compose project has no services model")
+unhealthy = []
+for name in manifest.get("dependency_services", []):
+    service = services.get(name)
+    healthcheck = service.get("healthcheck") if isinstance(service, dict) else None
+    test = healthcheck.get("test") if isinstance(healthcheck, dict) else None
+    disabled = bool(healthcheck.get("disable")) if isinstance(healthcheck, dict) else True
+    if disabled or not isinstance(test, list) or not test or str(test[0]).upper() == "NONE":
+        unhealthy.append(name)
+if unhealthy:
+    raise SystemExit(
+        "dependency services require enabled healthchecks: " + ", ".join(sorted(unhealthy))
+    )
+PY
+
+    note "agent ${agent_id}: valid"
+}
+
+validate_deployment() {
+    load_env
+    require_command docker
+    require_command python3
+    docker compose version >/dev/null
+    [[ "$REMOTEAGENT_REPO_ROOT" = "$ROOT_DIR" ]] || die "REMOTEAGENT_REPO_ROOT must equal $ROOT_DIR"
+    [[ "$REMOTEAGENT_STATE_ROOT" = "$ROOT_DIR/.runtime" ]] || die "REMOTEAGENT_STATE_ROOT must equal $ROOT_DIR/.runtime"
+    check_secret_mode "$(secret_path router_bearer_token)"
+    check_secret_mode "$(secret_path postgres_password)"
+    check_secret_mode "$(secret_path cron_mcp_token)"
+    check_secret_mode "$(secret_path cron_api_token)"
+    require_independent_service_tokens
+    validate_phonebook
+    compose config --quiet
+
+    local target="all"
+    if (($#)); then
+        case "$1" in
+            --agent) [[ $# -ge 2 ]] || die "--agent requires an id"; target=$2 ;;
+            --all) target=all ;;
+            *) die "unknown validate option: $1" ;;
+        esac
+    fi
+    if [[ "$target" = all ]]; then
+        local id
+        while IFS= read -r id; do
+            validate_agent "$id"
+        done < <(find_agent_ids)
+    else
+        validate_agent "$target"
+    fi
+    note "deployment configuration is valid"
+}
+
+build_images() {
+    load_env
+    lock_mutation
+    local scope=core
+    if (($#)) && [[ "$1" != --* ]]; then
+        scope=$1
+        shift
+    fi
+    local flags=("$@")
+    case "$scope" in
+        core)
+            compose --profile tools build "${flags[@]}" router cron codex-auth
+            ;;
+        all)
+            compose --profile tools build "${flags[@]}" router cron codex-auth
+            local id services=()
+            while IFS= read -r id; do
+                validate_agent "$id"
+                mapfile -t services < <(agent_service_names "$id")
+                agent_compose "$id" build "${flags[@]}" "${services[@]}"
+            done < <(find_agent_ids)
+            ;;
+        *) die "build scope must be core or all" ;;
+    esac
+}
+
+auth_command() {
+    load_env
+    local action=${1:-status}
+    shift || true
+    case "$action" in
+        status)
+            compose --profile tools run --rm --no-deps codex-auth login status
+            ;;
+        login)
+            lock_mutation
+            require_router_stopped_for_auth_mutation
+            local method=chatgpt browser=0 key_file=""
+            while (($#)); do
+                case "$1" in
+                    --method) method=${2:?}; shift ;;
+                    --browser) browser=1 ;;
+                    --key-file) key_file=${2:?}; shift ;;
+                    *) die "unknown auth login option: $1" ;;
+                esac
+                shift
+            done
+            case "$method" in
+                chatgpt)
+                    if (( browser )); then
+                        compose --profile tools run --rm --no-deps codex-auth login
+                    else
+                        compose --profile tools run --rm --no-deps codex-auth login --device-auth
+                    fi
+                    upsert_env REMOTEAGENT_AUTH_MODE chatgpt
+                    ;;
+                api)
+                    [[ -n "$key_file" && -r "$key_file" ]] || die "API mode requires --key-file PATH"
+                    check_secret_mode "$key_file"
+                    compose --profile tools run --rm --no-deps -T codex-auth login --with-api-key < "$key_file"
+                    upsert_env REMOTEAGENT_AUTH_MODE api
+                    ;;
+                *) die "auth method must be chatgpt or api" ;;
+            esac
+            ;;
+        import)
+            lock_mutation
+            require_router_stopped_for_auth_mutation
+            [[ "${1:-}" = --file && -n "${2:-}" ]] || die "usage: auth import --file PATH"
+            local import_file=$2
+            [[ -r "$import_file" ]] || die "cannot read $import_file"
+            check_secret_mode "$import_file"
+            compose --profile tools run --rm --no-deps -T --entrypoint sh codex-auth \
+                -c 'umask 077; cat > "$CODEX_HOME/auth.json"' < "$import_file"
+            note "auth imported; REMOTEAGENT_AUTH_MODE remains ${REMOTEAGENT_AUTH_MODE:-chatgpt}"
+            ;;
+        logout)
+            lock_mutation
+            require_router_stopped_for_auth_mutation
+            [[ "${1:-}" = --yes ]] || die "auth logout requires --yes"
+            compose --profile tools run --rm --no-deps codex-auth logout
+            ;;
+        *) die "unknown auth command: $action" ;;
+    esac
+}
+
+token_command() {
+    load_env
+    local action=${1:-status}
+    shift || true
+    local target=router
+    if (($#)) && [[ "$1" != --* ]]; then
+        target=$1
+        shift
+    fi
+    local names=()
+    case "$target" in
+        router) names=(router_bearer_token) ;;
+        cron) names=(cron_mcp_token cron_api_token) ;;
+        cron-mcp) names=(cron_mcp_token) ;;
+        cron-api) names=(cron_api_token) ;;
+        all) names=(router_bearer_token cron_mcp_token cron_api_token) ;;
+        *) die "token target must be router, cron, cron-mcp, cron-api, or all" ;;
+    esac
+    case "$action" in
+        status)
+            (($# == 0)) || die "token status takes only an optional target"
+            local name
+            for name in "${names[@]}"; do
+                check_secret_mode "$(secret_path "$name")"
+                note "${name} is present with restricted permissions"
+            done
+            ;;
+        print)
+            (($# == 0)) || die "token print takes only an optional target"
+            ((${#names[@]} == 1)) \
+                || die "token print requires one of: router, cron-mcp, cron-api"
+            local path
+            path=$(secret_path "${names[0]}")
+            check_secret_mode "$path"
+            cat "$path"
+            printf '\n'
+            ;;
+        rotate)
+            [[ "${1:-}" = --yes && $# -eq 1 ]] || die "token rotate requires --yes"
+            lock_mutation
+            local token_name token_path temp router_was_running=0 cron_was_running=0
+            for token_name in router_bearer_token cron_mcp_token cron_api_token; do
+                check_secret_mode "$(secret_path "$token_name")"
+            done
+            router_running && router_was_running=1
+            cron_running && cron_was_running=1
+            for token_name in "${names[@]}"; do
+                token_path=$(secret_path "$token_name")
+                temp="${token_path}.tmp.$$"
+                random_hex 32 > "$temp"
+                chmod 0600 "$temp"
+                mv -f "$temp" "$token_path"
+            done
+            require_independent_service_tokens
+            if [[ "$target" = router ]]; then
+                if (( router_was_running )); then
+                    compose up -d --force-recreate router
+                fi
+            else
+                # Both processes hold internal tokens in memory. Recreate them
+                # in dependency order when they were already running; a
+                # deliberately stopped cron service remains stopped.
+                if (( cron_was_running )); then
+                    compose stop --timeout 60 cron >/dev/null 2>&1 || true
+                fi
+                if (( router_was_running )); then
+                    compose up -d --wait --force-recreate router
+                fi
+                if (( cron_was_running )); then
+                    compose up -d --wait --force-recreate cron
+                fi
+            fi
+            if [[ "$target" = router || "$target" = all ]]; then
+                note "router bearer token rotated; update every external caller"
+            fi
+            if [[ "$target" != router ]]; then
+                note "cron service token rotation complete; router and cron were synchronized"
+            fi
+            ;;
+        *) die "unknown token command: $action" ;;
+    esac
+}
+
+skills_command() {
+    load_env
+    [[ "${1:-}" = sync ]] || die "usage: skills sync [--prune --yes]"
+    shift
+    local prune=0 confirmed=0
+    while (($#)); do
+        case "$1" in
+            --prune) prune=1 ;;
+            --yes) confirmed=1 ;;
+            *) die "unknown skills option: $1" ;;
+        esac
+        shift
+    done
+    (( prune == 0 || confirmed == 1 )) || die "skills sync --prune requires --yes"
+    lock_mutation
+    local volume=${REMOTEAGENT_SKILLS_VOLUME:-remoteagent-common-skills}
+    docker volume create --label io.remoteagent.managed=true "$volume" >/dev/null
+    local script='set -eu; cp -a /source/. /destination/'
+    if (( prune )); then
+        script='set -eu; find /destination -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; cp -a /source/. /destination/'
+    fi
+    docker run --rm --user 0 --entrypoint sh \
+        --mount "type=bind,src=${ROOT_DIR}/common-skills,dst=/source,readonly" \
+        --mount "type=volume,src=${volume},dst=/destination" \
+        "remoteagent/agent-base:${REMOTEAGENT_VERSION:-local}" -c "$script"
+    note "common skills synchronized"
+}
+
+lifecycle_start() {
+    load_env
+    lock_mutation
+    local wait_seconds=180 build=0
+    while (($#)); do
+        case "$1" in
+            --build) build=1 ;;
+            --wait) wait_seconds=${2:?}; shift ;;
+            *) die "unknown start option: $1" ;;
+        esac
+        shift
+    done
+    validate_deployment --all
+    local args=(up -d --wait --wait-timeout "$wait_seconds")
+    (( build )) && args+=(--build)
+    # Cron waits for the router's healthcheck and is started last. The router's
+    # own readiness remains independent so a cron outage is reported degraded
+    # rather than taking the core API out of service.
+    compose "${args[@]}" postgres redis router cron
+}
+
+lifecycle_stop() {
+    load_env
+    lock_mutation
+    local wait_seconds=60 force=0
+    while (($#)); do
+        case "$1" in
+            --wait) wait_seconds=${2:?}; shift ;;
+            --force) force=1 ;;
+            *) die "unknown stop option: $1" ;;
+        esac
+        shift
+    done
+    if (( force )); then
+        compose kill cron router redis postgres
+    else
+        compose stop --timeout "$wait_seconds" cron router redis postgres
+    fi
+}
+
+lifecycle_down() {
+    load_env
+    lock_mutation
+    local wait_seconds=60 force=0
+    while (($#)); do
+        case "$1" in
+            --wait) wait_seconds=${2:?}; shift ;;
+            --force) force=1 ;;
+            *) die "unknown down option: $1" ;;
+        esac
+        shift
+    done
+    if (( force )); then
+        compose kill cron router redis postgres || true
+    fi
+    compose down --timeout "$wait_seconds" --remove-orphans
+}
+
+lifecycle_restart() {
+    local wait_seconds=60 force=0 build=0
+    while (($#)); do
+        case "$1" in
+            --wait) wait_seconds=${2:?}; shift ;;
+            --force) force=1 ;;
+            --build) build=1 ;;
+            *) die "unknown restart option: $1" ;;
+        esac
+        shift
+    done
+    local stop_args=(--wait "$wait_seconds")
+    local start_args=(--wait "$wait_seconds")
+    (( force )) && stop_args+=(--force)
+    (( build )) && start_args+=(--build)
+    lifecycle_stop "${stop_args[@]}"
+    lifecycle_start "${start_args[@]}"
+}
+
+logs_command() {
+    load_env
+    local service=router
+    local args=(logs)
+    if (($#)) && [[ "$1" != --* ]]; then
+        service=$1
+        shift
+    fi
+    while (($#)); do
+        case "$1" in
+            --follow) args+=(--follow) ;;
+            --since) args+=(--since "${2:?}"); shift ;;
+            --tail) args+=(--tail "${2:?}"); shift ;;
+            *) die "unknown logs option: $1" ;;
+        esac
+        shift
+    done
+    if [[ "$service" = all ]]; then
+        compose "${args[@]}"
+    else
+        compose "${args[@]}" "$service"
+    fi
+}
+
+agent_command() {
+    load_env
+    local action=${1:-list}
+    shift || true
+    case "$action" in
+        list)
+            local id
+            if api GET /api/v1/agents 2>/dev/null; then
+                return
+            fi
+            while IFS= read -r id; do printf '%s\n' "$id"; done < <(find_agent_ids)
+            ;;
+        validate)
+            if [[ "${1:-}" = --all ]]; then
+                local id
+                while IFS= read -r id; do validate_agent "$id"; done < <(find_agent_ids)
+            else
+                [[ -n "${1:-}" ]] || die "agent validate requires ID or --all"
+                validate_agent "$1"
+            fi
+            ;;
+        build)
+            lock_mutation
+            local target=${1:-}
+            [[ -n "$target" ]] || die "agent build requires ID or --all"
+            shift
+            compose --profile tools build codex-auth
+            if [[ "$target" = --all ]]; then
+                local id services=()
+                while IFS= read -r id; do
+                    validate_agent "$id"
+                    mapfile -t services < <(agent_service_names "$id")
+                    agent_compose "$id" build "$@" "${services[@]}"
+                done < <(find_agent_ids)
+            else
+                validate_agent "$target"
+                local services=()
+                mapfile -t services < <(agent_service_names "$target")
+                agent_compose "$target" build "$@" "${services[@]}"
+            fi
+            ;;
+        new)
+            lock_mutation
+            local id=${1:-} name=""
+            [[ -n "$id" ]] || die "agent new requires ID"
+            shift
+            [[ "$id" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die "invalid agent id"
+            while (($#)); do
+                case "$1" in
+                    --name) name=${2:?}; shift ;;
+                    *) die "unknown agent new option: $1" ;;
+                esac
+                shift
+            done
+            [[ ! -e "$ROOT_DIR/$id" ]] || die "agent directory already exists: $id"
+            [[ -n "$name" ]] || name=${id//-/ }
+            mkdir "$ROOT_DIR/$id"
+            cp "$ROOT_DIR"/templates/agent/* "$ROOT_DIR/$id/"
+            require_command python3
+            python3 - "$ROOT_DIR/$id" "$id" "$name" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+agent_id = sys.argv[2]
+agent_name = sys.argv[3]
+for path in root.iterdir():
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            text.replace("__AGENT_ID__", agent_id).replace("__AGENT_NAME__", agent_name),
+            encoding="utf-8",
+        )
+PY
+            note "created ${id}; register it through the MCP/API after reviewing its files"
+            ;;
+        register)
+            local id=${1:-} replace=false
+            [[ -n "$id" ]] || die "agent register requires ID"
+            shift
+            [[ "${1:-}" = --replace ]] && replace=true
+            validate_agent "$id"
+            require_command python3
+            local payload
+            payload=$(python3 - "$ROOT_DIR/$id" "$replace" <<'PY'
+import json, pathlib, sys, tomllib
+root = pathlib.Path(sys.argv[1])
+replace = sys.argv[2].lower() == "true"
+with (root / "agent.toml").open("rb") as f:
+    data = tomllib.load(f)
+data.pop("schema_version", None)
+config_file = data.pop("config_file", None)
+context_file = data.pop("base_context_file", None)
+data["compose_file"] = str(root / data["compose_file"])
+if config_file:
+    data["config_toml"] = (root / config_file).read_text()
+if context_file:
+    data["base_context"] = (root / context_file).read_text()
+print(json.dumps({"definition": data, "replace": replace}))
+PY
+)
+            api POST /api/v1/agents --data "$payload"
+            ;;
+        *) die "unknown agent command: $action" ;;
+    esac
+}
+
+migrate_command() {
+    load_env
+    local action=${1:-status}
+    shift || true
+    local target=${1:-all}
+    [[ $# -le 1 ]] || die "migrate ${action} takes at most one target"
+    [[ "$target" = router || "$target" = cron || "$target" = all ]] \
+        || die "migration target must be router, cron, or all"
+    case "$action" in
+        status)
+            compose up -d --wait postgres >/dev/null
+            if [[ "$target" = router || "$target" = all ]]; then
+                note "router migration status"
+                compose run --rm --no-deps -e REMOTEAGENT_AUTO_MIGRATE=false router \
+                    alembic -c /opt/remoteagent/router/alembic.ini current
+            fi
+            if [[ "$target" = cron || "$target" = all ]]; then
+                note "cron migration status"
+                compose run --rm --no-deps -e REMOTEAGENT_CRON_AUTO_MIGRATE=false cron \
+                    alembic -c /opt/remoteagent/cron/alembic.ini current
+            fi
+            ;;
+        apply)
+            lock_mutation
+            compose up -d --wait postgres redis
+            if [[ "$target" = router || "$target" = all ]]; then
+                note "applying router migrations"
+                compose run --rm --no-deps -e REMOTEAGENT_AUTO_MIGRATE=false router \
+                    alembic -c /opt/remoteagent/router/alembic.ini upgrade head
+            fi
+            if [[ "$target" = cron || "$target" = all ]]; then
+                note "applying cron migrations"
+                compose run --rm --no-deps -e REMOTEAGENT_CRON_AUTO_MIGRATE=false cron \
+                    alembic -c /opt/remoteagent/cron/alembic.ini upgrade head
+            fi
+            ;;
+        *) die "unknown migrate command: $action" ;;
+    esac
+}
+
+validate_backup_archive() {
+    local archive=$1
+    python3 - "$archive" <<'PY'
+import hashlib
+import pathlib
+import re
+import sys
+import tarfile
+
+archive = pathlib.Path(sys.argv[1])
+allowed = {"manifest", "SHA256SUMS", "postgres.dump", "state.tar.gz"}
+payloads = {"manifest", "postgres.dump", "state.tar.gz"}
+with tarfile.open(archive, "r:gz") as bundle:
+    members = bundle.getmembers()
+    names = [member.name for member in members]
+    if len(names) != len(set(names)) or set(names) != allowed:
+        raise SystemExit(
+            "backup must contain exactly manifest, SHA256SUMS, postgres.dump, and state.tar.gz"
+        )
+    if any(not member.isfile() for member in members):
+        raise SystemExit("backup outer members must all be regular files")
+    by_name = {member.name: member for member in members}
+    checksum_file = bundle.extractfile(by_name["SHA256SUMS"])
+    if checksum_file is None:
+        raise SystemExit("backup checksum file cannot be read")
+    checksum_text = checksum_file.read().decode("ascii", errors="strict")
+    declared = {}
+    pattern = re.compile(r"^([0-9a-f]{64}) [ *](manifest|postgres\.dump|state\.tar\.gz)$")
+    for line in checksum_text.splitlines():
+        match = pattern.fullmatch(line)
+        if not match or match.group(2) in declared:
+            raise SystemExit("backup checksum manifest has unsafe or duplicate entries")
+        declared[match.group(2)] = match.group(1)
+    if set(declared) != payloads:
+        raise SystemExit("backup checksum manifest is incomplete")
+    for name in payloads:
+        stream = bundle.extractfile(by_name[name])
+        if stream is None:
+            raise SystemExit(f"backup member cannot be read: {name}")
+        hasher = hashlib.sha256()
+        while chunk := stream.read(1024 * 1024):
+            hasher.update(chunk)
+        digest = hasher.hexdigest()
+        if digest != declared[name]:
+            raise SystemExit(f"backup checksum failed: {name}")
+PY
+}
+
+validate_runtime_state_archive() {
+    local archive=$1
+    python3 - "$archive" <<'PY'
+import pathlib
+import re
+import sys
+import tarfile
+
+
+def lexical_parts(path: pathlib.PurePosixPath) -> tuple[str, ...] | None:
+    """Normalize a relative archive path without consulting the host filesystem."""
+    parts: list[str] = []
+    for part in path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(part)
+    return tuple(parts)
+
+
+archive = pathlib.Path(sys.argv[1])
+allowed = {"conversations", "artifact-store"}
+companion_alias = re.compile(
+    r"^conversations/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/"
+    r"workspace/companions/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+)
+companion_target = re.compile(
+    r"^\.\./\.remoteagent/companions/cc_[0-9a-f]{32}/(?:content|tree|repo)$"
+)
+with tarfile.open(archive, "r:gz") as bundle:
+    for member in bundle.getmembers():
+        path = pathlib.PurePosixPath(member.name)
+        if path.is_absolute() or ".." in path.parts or not path.parts:
+            raise SystemExit(f"unsafe runtime-state archive member: {member.name!r}")
+        if path.parts[0] not in allowed:
+            raise SystemExit(f"unexpected runtime-state archive member: {member.name!r}")
+        if member.issym():
+            target = pathlib.PurePosixPath(member.linkname)
+            resolved = None if target.is_absolute() else lexical_parts(path.parent / target)
+            has_parent_reference = ".." in target.parts
+            # Only the router-managed stable companion alias may contain a
+            # parent reference. Other relative links still have to remain in
+            # their current top-level state tree.
+            if (
+                resolved is None
+                or not resolved
+                or resolved[0] != path.parts[0]
+                or (
+                    has_parent_reference
+                    and not (
+                        companion_alias.fullmatch(member.name)
+                        and companion_target.fullmatch(member.linkname)
+                    )
+                )
+            ):
+                raise SystemExit(f"unsafe runtime-state archive link: {member.name!r}")
+        elif member.islnk():
+            # Tar hard-link names are relative to the archive root, unlike
+            # symbolic-link targets, which are relative to the link's parent.
+            target = pathlib.PurePosixPath(member.linkname)
+            resolved = None if target.is_absolute() else lexical_parts(target)
+            if (
+                resolved is None
+                or not resolved
+                or resolved[0] != path.parts[0]
+                or ".." in target.parts
+            ):
+                raise SystemExit(f"unsafe runtime-state archive link: {member.name!r}")
+PY
+}
+
+backup_command() {
+    load_env
+    local action=${1:-create}
+    shift || true
+    case "$action" in
+        create)
+            lock_mutation
+            require_command python3
+            local output="" backup_restart_router=0 backup_restart_cron=0
+            while (($#)); do
+                case "$1" in
+                    --output) output=${2:?}; shift ;;
+                    *) die "unknown backup option: $1" ;;
+                esac
+                shift
+            done
+            [[ -n "$output" ]] || output="$(state_root)/backups/remoteagent-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+            mkdir -p "$(dirname "$output")"
+            local staging
+            staging=$(mktemp -d "$(state_root)/backup.XXXXXX")
+            if cron_running; then
+                RESTART_CRON_ON_EXIT=1
+                backup_restart_cron=1
+                trap restart_router_exit_guard EXIT
+                note "quiescing cron before checking router work for backup"
+                compose stop --timeout 60 cron >/dev/null
+            fi
+            if router_running; then
+                require_router_idle
+                RESTART_ROUTER_ON_EXIT=1
+                backup_restart_router=1
+                trap restart_router_exit_guard EXIT
+                note "stopping idle router for a consistent backup snapshot"
+                compose stop --timeout 60 router >/dev/null
+            fi
+            compose up -d --wait postgres >/dev/null
+            compose exec -T --user postgres postgres pg_dump \
+                --username "${POSTGRES_USER:-remoteagent}" --dbname "${POSTGRES_DB:-remoteagent}" \
+                --format=custom > "$staging/postgres.dump"
+            mkdir -p "$(state_root)/conversations" "$(state_root)/artifact-store"
+            tar -C "$(state_root)" -czf "$staging/state.tar.gz" conversations artifact-store
+            printf 'version=%s\ncreated=%s\n' "${REMOTEAGENT_VERSION:-local}" "$(date -u +%FT%TZ)" > "$staging/manifest"
+            (cd "$staging" && sha256sum postgres.dump state.tar.gz manifest > SHA256SUMS)
+            tar -C "$staging" -czf "$output" manifest SHA256SUMS postgres.dump state.tar.gz
+            chmod 0600 "$output"
+            rm -rf -- "$staging"
+            if (( backup_restart_router )); then
+                note "restarting router after backup maintenance window"
+                compose up -d --wait router
+                RESTART_ROUTER_ON_EXIT=0
+            fi
+            if (( backup_restart_cron )); then
+                note "restarting cron after backup maintenance window"
+                compose up -d --wait cron
+                RESTART_CRON_ON_EXIT=0
+            fi
+            if (( RESTART_ROUTER_ON_EXIT == 0 && RESTART_CRON_ON_EXIT == 0 )); then
+                trap - EXIT
+            fi
+            note "backup written to ${output}; Codex auth and all service secrets were excluded"
+            ;;
+        verify)
+            local archive=${1:-}
+            [[ -r "$archive" ]] || die "backup verify requires a readable archive"
+            validate_backup_archive "$archive"
+            local staging
+            staging=$(mktemp -d)
+            tar -C "$staging" -xzf "$archive"
+            (cd "$staging" && sha256sum --check SHA256SUMS)
+            validate_runtime_state_archive "$staging/state.tar.gz"
+            rm -rf -- "$staging"
+            ;;
+        *) die "unknown backup command: $action" ;;
+    esac
+}
+
+restore_command() {
+    load_env
+    local archive=${1:-} confirmed=0
+    [[ -r "$archive" ]] || die "restore requires a readable backup archive"
+    shift
+    [[ "${1:-}" = --yes ]] && confirmed=1
+    (( confirmed )) || die "restore replaces database/runtime state and requires --yes"
+    lock_mutation
+    backup_command verify "$archive"
+    # Revalidate immediately before extraction to avoid trusting member paths
+    # merely because an earlier verification pass succeeded.
+    validate_backup_archive "$archive"
+    local staging
+    staging=$(mktemp -d "$(state_root)/restore.XXXXXX")
+    tar -C "$staging" -xzf "$archive"
+    mkdir -p "$staging/state"
+    validate_runtime_state_archive "$staging/state.tar.gz"
+    tar -C "$staging/state" -xzf "$staging/state.tar.gz"
+    [[ -d "$staging/state/conversations" ]] \
+        || die "backup is missing the conversations state tree"
+    [[ -d "$staging/state/artifact-store" ]] \
+        || die "backup is missing the artifact-store state tree"
+    compose stop cron router redis >/dev/null 2>&1 || true
+    compose up -d --wait postgres
+
+    # Render the custom archive completely before touching the live schema. The
+    # resulting file is inside the owner-only restore staging directory. Feeding
+    # the reset command and rendered archive to one psql single transaction
+    # preserves the old schema if any restore statement fails, while dropping
+    # application objects that are absent from an older archive (notably cron
+    # tables when restoring a pre-0.2 backup).
+    compose exec -T --user postgres postgres pg_restore \
+        --no-owner --file=- < "$staging/postgres.dump" > "$staging/postgres.sql"
+    compose exec -T --user postgres postgres psql \
+        --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction \
+        --username "${POSTGRES_USER:-remoteagent}" --dbname "${POSTGRES_DB:-remoteagent}" \
+        --command 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public AUTHORIZATION CURRENT_USER; GRANT USAGE ON SCHEMA public TO PUBLIC;' \
+        --file=- < "$staging/postgres.sql"
+
+    # Unclaimed stage bytes are deliberately excluded from backups. Expire any
+    # restored admission rows before the router can requeue an import or expose
+    # a ready stage whose ephemeral source is gone. The dynamic statement keeps
+    # restores of pre-companion backups valid when the table does not exist.
+    compose exec -T --user postgres postgres psql \
+        --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction \
+        --username "${POSTGRES_USER:-remoteagent}" --dbname "${POSTGRES_DB:-remoteagent}" \
+        --file=- <<'SQL'
+DO $remoteagent$
+BEGIN
+    IF to_regclass('public.companion_stages') IS NOT NULL THEN
+        EXECUTE $statement$
+            UPDATE public.companion_stages
+            SET status = 'expired',
+                storage_path = NULL,
+                error = 'stage bytes were excluded from the restored backup',
+                expires_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE claimed_at IS NULL
+              AND status IN ('queued', 'importing', 'ready')
+        $statement$;
+    END IF;
+END
+$remoteagent$;
+SQL
+
+    # Swap complete trees on the same filesystem so files left by the current
+    # deployment cannot survive an older restore. Keep the previous trees in
+    # staging until both replacements have succeeded.
+    local runtime_root conversations_path artifacts_path name target replacement previous
+    runtime_root=$(state_root)
+    conversations_path="$runtime_root/conversations"
+    artifacts_path="$runtime_root/artifact-store"
+    for target in "$conversations_path" "$artifacts_path"; do
+        [[ "$target" = "$runtime_root/conversations" || "$target" = "$runtime_root/artifact-store" ]] \
+            || die "refusing unsafe restore target: $target"
+        [[ ! -L "$target" ]] || die "refusing symlink restore target: $target"
+        mkdir -p "$target"
+    done
+    local replaced=()
+    for name in conversations artifact-store; do
+        target="$runtime_root/$name"
+        replacement="$staging/state/$name"
+        previous="$staging/previous-$name"
+        mv -- "$target" "$previous"
+        if ! mv -- "$replacement" "$target"; then
+            mv -- "$previous" "$target"
+            local completed
+            for completed in "${replaced[@]}"; do
+                rm -rf -- "$runtime_root/$completed"
+                mv -- "$staging/previous-$completed" "$runtime_root/$completed"
+            done
+            die "failed to replace restored runtime tree: $name"
+        fi
+        replaced+=("$name")
+    done
+    rm -rf -- "$staging"
+    note "starting router after restored database and runtime state"
+    compose up -d --wait --wait-timeout 180 postgres redis router
+    note "starting cron after router is healthy"
+    compose up -d --wait --wait-timeout 180 cron
+    note "restore complete; router and cron are healthy"
+}
+
+cleanup_command() {
+    load_env
+    local apply=0 confirmed=0 older_than=7
+    while (($#)); do
+        case "$1" in
+            --apply) apply=1 ;;
+            --yes) confirmed=1 ;;
+            --older-than) older_than=${2:?}; shift ;;
+            *) die "unknown cleanup option: $1" ;;
+        esac
+        shift
+    done
+    [[ "$older_than" =~ ^[0-9]+$ ]] || die "--older-than must be whole days"
+    local instance=${REMOTEAGENT_INSTANCE_ID:-${COMPOSE_PROJECT_NAME:-remoteagent}}
+    local cutoff_epoch
+    cutoff_epoch=$(date -u -d "${older_than} days ago" +%s) \
+        || die "could not calculate cleanup cutoff"
+    local matches=() container_id finished_at finished_epoch
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        finished_at=$(docker inspect --format '{{.State.FinishedAt}}' "$container_id")
+        [[ "$finished_at" != 0001-01-01T00:00:00Z ]] || continue
+        finished_epoch=$(date -u -d "$finished_at" +%s 2>/dev/null || printf '0')
+        (( finished_epoch > 0 && finished_epoch <= cutoff_epoch )) && matches+=("$container_id")
+    done < <(
+        {
+            docker ps --all --quiet \
+                --filter label=io.remoteagent.managed=true \
+                --filter "label=io.remoteagent.instance=${instance}" \
+                --filter status=exited
+            docker ps --all --quiet \
+                --filter label=io.remoteagent.managed=true \
+                --filter "label=io.remoteagent.instance=${instance}" \
+                --filter status=dead
+        } | sort -u
+    )
+    if (( ! apply )); then
+        if ((${#matches[@]})); then
+            printf 'Eligible terminal containers for instance %s (older than %s days):\n' \
+                "$instance" "$older_than"
+            docker inspect --format '{{.Id}} {{.Config.Image}} {{.State.Status}} {{.State.FinishedAt}}' \
+                "${matches[@]}"
+        else
+            printf 'No eligible terminal containers found for instance %s.\n' "$instance"
+        fi
+        return
+    fi
+    (( confirmed )) || die "cleanup --apply requires --yes"
+    lock_mutation
+    if ((${#matches[@]})); then
+        docker rm -- "${matches[@]}" >/dev/null
+    fi
+    note "instance-labelled container cleanup complete; all database and conversation state was preserved"
+}
+
+doctor_command() {
+    load_env
+    local failures=0
+    printf '%-34s %s\n' CHECK RESULT
+    if docker info >/dev/null 2>&1; then
+        printf '%-34s %s\n' 'Docker daemon' OK
+    else
+        printf '%-34s %s\n' 'Docker daemon' FAILED
+        failures=$((failures + 1))
+    fi
+    if docker compose version >/dev/null 2>&1; then
+        printf '%-34s %s\n' 'Docker Compose v2+' OK
+    else
+        printf '%-34s %s\n' 'Docker Compose v2+' FAILED
+        failures=$((failures + 1))
+    fi
+    local secret
+    for secret in router_bearer_token postgres_password cron_mcp_token cron_api_token; do
+        if secret_mode_valid "$(secret_path "$secret")"; then
+            printf '%-34s %s\n' "Secret ${secret}" OK
+        else
+            printf '%-34s %s\n' "Secret ${secret}" FAILED
+            failures=$((failures + 1))
+        fi
+    done
+    if service_tokens_independent; then
+        printf '%-34s %s\n' 'Service token independence' OK
+    else
+        printf '%-34s %s\n' 'Service token independence' FAILED
+        failures=$((failures + 1))
+    fi
+    if compose config --quiet >/dev/null 2>&1; then
+        printf '%-34s %s\n' 'Compose model' OK
+    else
+        printf '%-34s %s\n' 'Compose model' FAILED
+        failures=$((failures + 1))
+    fi
+    local version=${REMOTEAGENT_VERSION:-local} image
+    for image in \
+        "remoteagent/router:${version}" \
+        "remoteagent/cron:${version}" \
+        "remoteagent/agent-base:${version}"; do
+        if docker image inspect "$image" >/dev/null 2>&1; then
+            printf '%-34s %s\n' "Image ${image}" OK
+        else
+            printf '%-34s %s\n' "Image ${image}" MISSING
+            failures=$((failures + 1))
+        fi
+    done
+
+    local sandbox_uid=${REMOTEAGENT_UID:-1000} sandbox_gid=${REMOTEAGENT_GID:-1000}
+    if docker image inspect "remoteagent/agent-base:${version}" >/dev/null 2>&1 \
+        && docker run --rm --network none --read-only \
+            --user "${sandbox_uid}:${sandbox_gid}" \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --tmpfs "/tmp:rw,exec,nosuid,nodev,size=16m,mode=1777,uid=${sandbox_uid},gid=${sandbox_gid}" \
+            --tmpfs "/home/agent/.codex:rw,exec,nosuid,nodev,size=16m,mode=0700,uid=${sandbox_uid},gid=${sandbox_gid}" \
+            --tmpfs "/workspace:rw,exec,nosuid,nodev,size=16m,mode=0700,uid=${sandbox_uid},gid=${sandbox_gid}" \
+            "remoteagent/agent-base:${version}" sh -ceu '
+                test "$(stat -c "%a:%u:%g" /etc/codex/requirements.toml)" = "444:0:0"
+                printf "%s\n" sandbox-probe > "$CODEX_HOME/auth.json"
+                codex sandbox -c '\''sandbox_mode="workspace-write"'\'' -- sh -ceu '\''
+                    test ! -r /home/agent/.codex/auth.json
+                    printf "%s\n" ok > /workspace/.remoteagent-sandbox-probe
+                    test -s /workspace/.remoteagent-sandbox-probe
+                '\''
+            ' >/dev/null 2>&1; then
+        printf '%-34s %s\n' 'Codex inner sandbox policy' OK
+    else
+        printf '%-34s %s\n' 'Codex inner sandbox policy' FAILED
+        failures=$((failures + 1))
+    fi
+
+    local auth_volume=${REMOTEAGENT_AUTH_VOLUME:-remoteagent-codex-auth}
+    if docker image inspect "remoteagent/agent-base:${version}" >/dev/null 2>&1 \
+        && docker volume inspect "$auth_volume" >/dev/null 2>&1 \
+        && docker run --rm --network none --read-only --tmpfs /tmp:size=8m,mode=1777 \
+            --mount "type=volume,src=${auth_volume},dst=/auth,readonly" \
+            --env CODEX_HOME=/auth --entrypoint codex \
+            "remoteagent/agent-base:${version}" login status >/dev/null 2>&1; then
+        printf '%-34s %s\n' 'Codex subscription auth' OK
+    else
+        printf '%-34s %s\n' 'Codex subscription auth' 'MISSING/INVALID'
+        failures=$((failures + 1))
+    fi
+
+    local id
+    while IFS= read -r id; do
+        if validate_agent "$id" >/dev/null 2>&1; then
+            printf '%-34s %s\n' "Agent ${id} definition" OK
+        else
+            printf '%-34s %s\n' "Agent ${id} definition" FAILED
+            failures=$((failures + 1))
+        fi
+        image="remoteagent/${id}:${version}"
+        if docker image inspect "$image" >/dev/null 2>&1; then
+            printf '%-34s %s\n' "Agent ${id} image" OK
+        else
+            printf '%-34s %s\n' "Agent ${id} image" MISSING
+            failures=$((failures + 1))
+        fi
+    done < <(find_agent_ids)
+    if curl --fail --silent "$(router_url)/healthz" >/dev/null 2>&1; then
+        printf '%-34s %s\n' 'Router health' OK
+    else
+        printf '%-34s %s\n' 'Router health' 'not running/unhealthy'
+        failures=$((failures + 1))
+    fi
+    if cron_running && compose exec -T cron python -c '
+import urllib.request
+token = open("/run/secrets/cron_api_token", encoding="utf-8").read().strip()
+request = urllib.request.Request(
+    "http://127.0.0.1:8090/readyz",
+    headers={"Authorization": f"Bearer {token}"},
+)
+urllib.request.urlopen(request, timeout=5).read()
+' >/dev/null 2>&1; then
+        printf '%-34s %s\n' 'Cron DB/MCP readiness + auth' OK
+    else
+        printf '%-34s %s\n' 'Cron DB/MCP readiness + auth' 'not running/unready'
+        failures=$((failures + 1))
+    fi
+    local available
+    available=$(df -Pk "$(state_root)" | awk 'NR==2 {print $4}')
+    if [[ -n "$available" && "$available" -gt 1048576 ]]; then
+        printf '%-34s %s\n' 'State disk free (>1 GiB)' OK
+    else
+        printf '%-34s %s\n' 'State disk free (>1 GiB)' LOW
+        failures=$((failures + 1))
+    fi
+    return "$failures"
+}
+
+upgrade_command() {
+    load_env
+    local action=${1:-check}
+    shift || true
+    local upgrade_secret
+    for upgrade_secret in cron_mcp_token cron_api_token; do
+        secret_mode_valid "$(secret_path "$upgrade_secret")" \
+            || die "release 0.2 requires ${upgrade_secret}; run scripts/remotectl init --non-interactive before upgrade"
+    done
+    case "$action" in
+        check)
+            git -C "$ROOT_DIR" status --short
+            printf 'deployed=%s checkout=%s\n' "${REMOTEAGENT_VERSION:-local}" "$(git -C "$ROOT_DIR" describe --always --dirty)"
+            validate_deployment --all
+            ;;
+        apply)
+            [[ "${1:-}" = --yes ]] || die "upgrade apply requires --yes"
+            [[ -z "$(git -C "$ROOT_DIR" status --porcelain)" ]] || die "upgrade refuses a dirty checkout"
+            lock_mutation
+            if cron_running; then
+                RESTART_CRON_ON_EXIT=1
+                trap restart_router_exit_guard EXIT
+                note "quiescing cron before checking router work for upgrade"
+                compose stop --timeout 60 cron >/dev/null
+            fi
+            if router_running; then
+                require_router_idle
+                RESTART_ROUTER_ON_EXIT=1
+                trap restart_router_exit_guard EXIT
+                note "stopping idle router for the upgrade maintenance window"
+                compose stop --timeout 60 router >/dev/null
+            fi
+            backup_command create
+            build_images all --pull
+            compose up -d --wait --remove-orphans postgres redis router cron
+            RESTART_ROUTER_ON_EXIT=0
+            RESTART_CRON_ON_EXIT=0
+            trap - EXIT
+            ;;
+        *) die "unknown upgrade command: $action" ;;
+    esac
+}
+
+smoke_live() {
+    load_env
+    is_ci && die "live smoke tests are disabled in CI; deterministic fakes cover this workflow"
+    local agent_id=joke-agent timeout=300 keep=0
+    while (($#)); do
+        case "$1" in
+            --agent) agent_id=${2:?}; shift ;;
+            --timeout) timeout=${2:?}; shift ;;
+            --keep) keep=1 ;;
+            *) die "unknown smoke option: $1" ;;
+        esac
+        shift
+    done
+    require_command python3
+    require_command curl
+    auth_command status >/dev/null
+    REMOTEAGENT_SMOKE_URL="$(router_url)" \
+    REMOTEAGENT_SMOKE_TOKEN="$(router_token)" \
+    REMOTEAGENT_SMOKE_AGENT="$agent_id" \
+    REMOTEAGENT_SMOKE_TIMEOUT="$timeout" \
+    REMOTEAGENT_SMOKE_KEEP="$keep" \
+    REMOTEAGENT_SMOKE_JSON="$JSON_OUTPUT" \
+        python3 "$ROOT_DIR/scripts/smoke_joke_agent.py"
+}
+
+bootstrap_command() {
+    local non_interactive=0
+    [[ "${1:-}" = --non-interactive ]] && non_interactive=1
+    if (( non_interactive )); then
+        init_deployment --non-interactive
+    else
+        init_deployment
+    fi
+    load_env
+    build_images all
+    skills_command sync
+    validate_deployment --all
+    if ! auth_command status >/dev/null 2>&1; then
+        (( non_interactive == 0 )) || die "Codex is not authenticated; run scripts/remotectl auth login"
+        auth_command login --method chatgpt
+    fi
+    lifecycle_start
+}
+
+while (($#)); do
+    case "$1" in
+        --env-file) ENV_FILE=$(realpath "$2"); shift 2 ;;
+        --project) PROJECT_NAME=$2; shift 2 ;;
+        --json) JSON_OUTPUT=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) die "unknown global option: $1" ;;
+        *) break ;;
+    esac
+done
+
+command_name=${1:-help}
+shift || true
+
+case "$command_name" in
+    help) usage ;;
+    init) init_deployment "$@" ;;
+    bootstrap) bootstrap_command "$@" ;;
+    validate) validate_deployment "$@" ;;
+    build) build_images "$@" ;;
+    auth) auth_command "$@" ;;
+    token) token_command "$@" ;;
+    skills) skills_command "$@" ;;
+    start) lifecycle_start "$@" ;;
+    stop) lifecycle_stop "$@" ;;
+    restart) lifecycle_restart "$@" ;;
+    down) lifecycle_down "$@" ;;
+    status) load_env; compose ps ;;
+    logs) logs_command "$@" ;;
+    agent) agent_command "$@" ;;
+    migrate) migrate_command "$@" ;;
+    backup) backup_command "$@" ;;
+    restore) restore_command "$@" ;;
+    cleanup) cleanup_command "$@" ;;
+    doctor) doctor_command "$@" ;;
+    upgrade) upgrade_command "$@" ;;
+    smoke)
+        [[ "${1:-}" = live ]] || die "live smoke requires: smoke live"
+        shift
+        smoke_live "$@"
+        ;;
+    *) die "unknown command: $command_name (run scripts/remotectl help)" ;;
+esac
