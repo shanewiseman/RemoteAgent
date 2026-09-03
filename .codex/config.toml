@@ -1,0 +1,10 @@
+# Project-scoped Codex client connection to the local RemoteAgent router.
+# The bearer token is supplied by the desktop launcher and is never stored here.
+[mcp_servers.remoteagent]
+url = "http://127.0.0.1:8080/mcp"
+bearer_token_env_var = "REMOTEAGENT_MCP_TOKEN"
+enabled = true
+required = false
+startup_timeout_sec = 15
+tool_timeout_sec = 120
+default_tools_approval_mode = "writes"
