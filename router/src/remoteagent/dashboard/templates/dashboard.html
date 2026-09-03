@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="wordmark" href="/dashboard/" aria-label="RemoteAgent overview">
+      <span class="brand-mark" aria-hidden="true">RA</span>
+      <span>RemoteAgent</span>
+    </a>
+    <nav aria-label="Dashboard">
+      <a href="/dashboard/" data-nav="overview">Overview</a>
+      <a href="/dashboard/agents" data-nav="agents">Agents</a>
+      <a href="/dashboard/jobs" data-nav="jobs">Jobs</a>
+      <a href="/dashboard/history" data-nav="conversations">History</a>
+      <a href="/dashboard/artifacts" data-nav="artifacts">Artifacts</a>
+      <a href="/dashboard/system" data-nav="system">System</a>
+      {% if debug_enabled %}<a href="/dashboard/debug" data-nav="debug">Debug</a>{% endif %}
+    </nav>
+    <form method="post" action="/dashboard/logout" class="logout-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="quiet" type="submit">Sign out</button>
+    </form>
+  </aside>
+  <main
+    id="dashboard-main"
+    class="content"
+    data-page="{{ page }}"
+    data-entity-id="{{ entity_id }}"
+  >
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">RemoteAgent operations</p>
+        <h1>{{ title }}</h1>
+      </div>
+      <div class="live-indicator" id="live-indicator"><span></span> Connecting</div>
+    </header>
+    <section id="dashboard-content" aria-live="polite">
+      <div class="loading">Loading current state…</div>
+    </section>
+  </main>
+</div>
+<script src="/dashboard/static/dashboard.js" defer></script>
+{% endblock %}

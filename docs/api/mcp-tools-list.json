@@ -1,0 +1,3852 @@
+{
+  "tools": [
+    {
+      "name": "list_agents",
+      "description": "Discover registered agents and their current configuration revisions.",
+      "inputSchema": {
+        "properties": {
+          "include_disabled": {
+            "default": false,
+            "title": "Include Disabled",
+            "type": "boolean"
+          }
+        },
+        "title": "list_agentsArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "AgentSummary": {
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "description": {
+                "title": "Description",
+                "type": "string"
+              },
+              "enabled": {
+                "title": "Enabled",
+                "type": "boolean"
+              },
+              "revision": {
+                "title": "Revision",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "description",
+              "enabled",
+              "revision"
+            ],
+            "title": "AgentSummary",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "result": {
+            "items": {
+              "$ref": "#/$defs/AgentSummary"
+            },
+            "title": "Result",
+            "type": "array"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "list_agentsOutput",
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_agent",
+      "description": "Get one agent, including its effective TOML and base context.",
+      "inputSchema": {
+        "properties": {
+          "agent_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Agent Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "get_agentArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "compose_file": {
+            "title": "Compose File",
+            "type": "string"
+          },
+          "project_name": {
+            "title": "Project Name",
+            "type": "string"
+          },
+          "runner_service": {
+            "title": "Runner Service",
+            "type": "string"
+          },
+          "dependency_services": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dependency Services",
+            "type": "array"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Environment",
+            "type": "object"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "object"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "config_toml": {
+            "title": "Config Toml",
+            "type": "string"
+          },
+          "base_context": {
+            "title": "Base Context",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "enabled",
+          "revision",
+          "compose_file",
+          "project_name",
+          "runner_service",
+          "dependency_services",
+          "environment",
+          "labels",
+          "metadata",
+          "config_toml",
+          "base_context"
+        ],
+        "title": "AgentView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "register_agent",
+      "description": "Register a project-local Compose agent after path/service validation.",
+      "inputSchema": {
+        "$defs": {
+          "AgentDefinition": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+                "title": "Id",
+                "type": "string"
+              },
+              "name": {
+                "maxLength": 128,
+                "minLength": 1,
+                "title": "Name",
+                "type": "string"
+              },
+              "description": {
+                "default": "",
+                "maxLength": 4096,
+                "title": "Description",
+                "type": "string"
+              },
+              "compose_file": {
+                "format": "path",
+                "title": "Compose File",
+                "type": "string"
+              },
+              "project_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+                "title": "Project Name"
+              },
+              "runner_service": {
+                "default": "agent",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$",
+                "title": "Runner Service",
+                "type": "string"
+              },
+              "dependency_services": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "title": "Dependency Services",
+                "type": "array"
+              },
+              "enabled": {
+                "default": true,
+                "title": "Enabled",
+                "type": "boolean"
+              },
+              "config_toml": {
+                "default": "",
+                "title": "Config Toml",
+                "type": "string"
+              },
+              "base_context": {
+                "default": "",
+                "maxLength": 1000000,
+                "title": "Base Context",
+                "type": "string"
+              },
+              "environment": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "title": "Environment",
+                "type": "object"
+              },
+              "labels": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "title": "Labels",
+                "type": "object"
+              },
+              "metadata": {
+                "additionalProperties": true,
+                "title": "Metadata",
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "compose_file"
+            ],
+            "title": "AgentDefinition",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "definition": {
+            "$ref": "#/$defs/AgentDefinition"
+          },
+          "replace": {
+            "default": false,
+            "title": "Replace",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "definition"
+        ],
+        "title": "register_agentArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "compose_file": {
+            "title": "Compose File",
+            "type": "string"
+          },
+          "project_name": {
+            "title": "Project Name",
+            "type": "string"
+          },
+          "runner_service": {
+            "title": "Runner Service",
+            "type": "string"
+          },
+          "dependency_services": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dependency Services",
+            "type": "array"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Environment",
+            "type": "object"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "object"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "config_toml": {
+            "title": "Config Toml",
+            "type": "string"
+          },
+          "base_context": {
+            "title": "Base Context",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "enabled",
+          "revision",
+          "compose_file",
+          "project_name",
+          "runner_service",
+          "dependency_services",
+          "environment",
+          "labels",
+          "metadata",
+          "config_toml",
+          "base_context"
+        ],
+        "title": "AgentView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "update_agent_configuration",
+      "description": "Append an immutable effective configuration/context revision.",
+      "inputSchema": {
+        "properties": {
+          "agent_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "config_toml": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Config Toml"
+          },
+          "base_context": {
+            "anyOf": [
+              {
+                "maxLength": 1000000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Base Context"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "update_agent_configurationArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "compose_file": {
+            "title": "Compose File",
+            "type": "string"
+          },
+          "project_name": {
+            "title": "Project Name",
+            "type": "string"
+          },
+          "runner_service": {
+            "title": "Runner Service",
+            "type": "string"
+          },
+          "dependency_services": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dependency Services",
+            "type": "array"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Environment",
+            "type": "object"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "object"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "config_toml": {
+            "title": "Config Toml",
+            "type": "string"
+          },
+          "base_context": {
+            "title": "Base Context",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "enabled",
+          "revision",
+          "compose_file",
+          "project_name",
+          "runner_service",
+          "dependency_services",
+          "environment",
+          "labels",
+          "metadata",
+          "config_toml",
+          "base_context"
+        ],
+        "title": "AgentView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "submit_prompt",
+      "description": "Queue a turn, optionally binding ready companions; model settings start a thread.",
+      "inputSchema": {
+        "$defs": {
+          "CompanionBinding": {
+            "additionalProperties": false,
+            "description": "Bind one ready, single-use stage to a conversation under a stable name.",
+            "properties": {
+              "stage_id": {
+                "description": "Opaque identifier for a single-use companion stage.",
+                "maxLength": 35,
+                "minLength": 35,
+                "pattern": "^cs_[0-9a-f]{32}$",
+                "title": "Stage Id",
+                "type": "string"
+              },
+              "name": {
+                "description": "One safe path component used below /workspace/companions.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                "title": "Name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "stage_id",
+              "name"
+            ],
+            "title": "CompanionBinding",
+            "type": "object"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "agent_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "prompt": {
+            "maxLength": 2000000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "conversation_key": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Conversation Key"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          },
+          "companions": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/CompanionBinding"
+            },
+            "maxItems": 20,
+            "title": "Companions",
+            "type": "array"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "description": "OpenAI model identifier selected for a conversation.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "agent_id",
+          "prompt"
+        ],
+        "title": "submit_promptArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CompanionStageKind": {
+            "enum": [
+              "file",
+              "archive",
+              "git"
+            ],
+            "title": "CompanionStageKind",
+            "type": "string"
+          },
+          "ConversationCompanionStatus": {
+            "enum": [
+              "pending",
+              "active",
+              "superseded"
+            ],
+            "title": "ConversationCompanionStatus",
+            "type": "string"
+          },
+          "ConversationCompanionView": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "stage_id": {
+                "description": "Opaque identifier for a single-use companion stage.",
+                "maxLength": 35,
+                "minLength": 35,
+                "pattern": "^cs_[0-9a-f]{32}$",
+                "title": "Stage Id",
+                "type": "string"
+              },
+              "conversation_key": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "title": "Conversation Key",
+                "type": "string"
+              },
+              "introduced_job_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Introduced Job Id"
+              },
+              "introducing_sequence": {
+                "minimum": 1,
+                "title": "Introducing Sequence",
+                "type": "integer"
+              },
+              "name": {
+                "description": "One safe path component used below /workspace/companions.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                "title": "Name",
+                "type": "string"
+              },
+              "version": {
+                "minimum": 1,
+                "title": "Version",
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/CompanionStageKind"
+              },
+              "status": {
+                "$ref": "#/$defs/ConversationCompanionStatus"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "size_bytes": {
+                "minimum": 0,
+                "title": "Size Bytes",
+                "type": "integer"
+              },
+              "file_count": {
+                "minimum": 0,
+                "title": "File Count",
+                "type": "integer"
+              },
+              "sha256": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Sha256",
+                "type": "string"
+              },
+              "resolved_git_commit": {
+                "anyOf": [
+                  {
+                    "maxLength": 64,
+                    "minLength": 40,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Resolved Git Commit"
+              },
+              "activated_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Activated At"
+              },
+              "superseded_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Superseded At"
+              },
+              "last_activation_error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Activation Error"
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              },
+              "updated_at": {
+                "format": "date-time",
+                "title": "Updated At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "stage_id",
+              "conversation_key",
+              "introduced_job_id",
+              "introducing_sequence",
+              "name",
+              "version",
+              "kind",
+              "status",
+              "path",
+              "size_bytes",
+              "file_count",
+              "sha256",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "ConversationCompanionView",
+            "type": "object"
+          },
+          "JobStatus": {
+            "enum": [
+              "queued",
+              "provisioning",
+              "waiting_for_lease",
+              "running",
+              "collecting",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "interrupted",
+              "expired"
+            ],
+            "title": "JobStatus",
+            "type": "string"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "conversation_key": {
+            "title": "Conversation Key",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/JobStatus"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "description": "OpenAI model identifier selected for a conversation.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Stored conversation model, or null when model selection is inherited.",
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Stored conversation reasoning effort, or null when effort selection is inherited."
+          },
+          "companion_additions": {
+            "items": {
+              "$ref": "#/$defs/ConversationCompanionView"
+            },
+            "title": "Companion Additions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "job_id",
+          "conversation_key",
+          "status",
+          "model",
+          "reasoning_effort"
+        ],
+        "title": "PromptAccepted",
+        "type": "object"
+      }
+    },
+    {
+      "name": "stage_git_repository",
+      "description": "Queue a full-history import of a credential-free public HTTPS Git repository.",
+      "inputSchema": {
+        "properties": {
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Ref"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "stage_git_repositoryArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CompanionStageKind": {
+            "enum": [
+              "file",
+              "archive",
+              "git"
+            ],
+            "title": "CompanionStageKind",
+            "type": "string"
+          },
+          "CompanionStageStatus": {
+            "enum": [
+              "queued",
+              "importing",
+              "ready",
+              "failed",
+              "claimed",
+              "expired"
+            ],
+            "title": "CompanionStageStatus",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Opaque identifier for a single-use companion stage.",
+            "maxLength": 35,
+            "minLength": 35,
+            "pattern": "^cs_[0-9a-f]{32}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/CompanionStageKind"
+          },
+          "status": {
+            "$ref": "#/$defs/CompanionStageStatus"
+          },
+          "source_metadata": {
+            "additionalProperties": true,
+            "title": "Source Metadata",
+            "type": "object"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Size Bytes"
+          },
+          "file_count": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File Count"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sha256"
+          },
+          "resolved_git_commit": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Resolved Git Commit"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "claimed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "source_metadata",
+          "expires_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CompanionStageView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_companion_stage",
+      "description": "Poll a companion stage until it is ready, failed, claimed, or expired.",
+      "inputSchema": {
+        "properties": {
+          "stage_id": {
+            "description": "Opaque identifier for a single-use companion stage.",
+            "maxLength": 35,
+            "minLength": 35,
+            "pattern": "^cs_[0-9a-f]{32}$",
+            "title": "Stage Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage_id"
+        ],
+        "title": "get_companion_stageArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CompanionStageKind": {
+            "enum": [
+              "file",
+              "archive",
+              "git"
+            ],
+            "title": "CompanionStageKind",
+            "type": "string"
+          },
+          "CompanionStageStatus": {
+            "enum": [
+              "queued",
+              "importing",
+              "ready",
+              "failed",
+              "claimed",
+              "expired"
+            ],
+            "title": "CompanionStageStatus",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Opaque identifier for a single-use companion stage.",
+            "maxLength": 35,
+            "minLength": 35,
+            "pattern": "^cs_[0-9a-f]{32}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/CompanionStageKind"
+          },
+          "status": {
+            "$ref": "#/$defs/CompanionStageStatus"
+          },
+          "source_metadata": {
+            "additionalProperties": true,
+            "title": "Source Metadata",
+            "type": "object"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Size Bytes"
+          },
+          "file_count": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File Count"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sha256"
+          },
+          "resolved_git_commit": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Resolved Git Commit"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "claimed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "source_metadata",
+          "expires_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CompanionStageView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_conversation_companions",
+      "description": "List active and pending companions, optionally including superseded versions.",
+      "inputSchema": {
+        "properties": {
+          "conversation_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Conversation Key",
+            "type": "string"
+          },
+          "include_history": {
+            "default": false,
+            "title": "Include History",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "conversation_key"
+        ],
+        "title": "list_conversation_companionsArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CompanionStageKind": {
+            "enum": [
+              "file",
+              "archive",
+              "git"
+            ],
+            "title": "CompanionStageKind",
+            "type": "string"
+          },
+          "ConversationCompanionStatus": {
+            "enum": [
+              "pending",
+              "active",
+              "superseded"
+            ],
+            "title": "ConversationCompanionStatus",
+            "type": "string"
+          },
+          "ConversationCompanionView": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "stage_id": {
+                "description": "Opaque identifier for a single-use companion stage.",
+                "maxLength": 35,
+                "minLength": 35,
+                "pattern": "^cs_[0-9a-f]{32}$",
+                "title": "Stage Id",
+                "type": "string"
+              },
+              "conversation_key": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "title": "Conversation Key",
+                "type": "string"
+              },
+              "introduced_job_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Introduced Job Id"
+              },
+              "introducing_sequence": {
+                "minimum": 1,
+                "title": "Introducing Sequence",
+                "type": "integer"
+              },
+              "name": {
+                "description": "One safe path component used below /workspace/companions.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                "title": "Name",
+                "type": "string"
+              },
+              "version": {
+                "minimum": 1,
+                "title": "Version",
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/CompanionStageKind"
+              },
+              "status": {
+                "$ref": "#/$defs/ConversationCompanionStatus"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "size_bytes": {
+                "minimum": 0,
+                "title": "Size Bytes",
+                "type": "integer"
+              },
+              "file_count": {
+                "minimum": 0,
+                "title": "File Count",
+                "type": "integer"
+              },
+              "sha256": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Sha256",
+                "type": "string"
+              },
+              "resolved_git_commit": {
+                "anyOf": [
+                  {
+                    "maxLength": 64,
+                    "minLength": 40,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Resolved Git Commit"
+              },
+              "activated_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Activated At"
+              },
+              "superseded_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Superseded At"
+              },
+              "last_activation_error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Activation Error"
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              },
+              "updated_at": {
+                "format": "date-time",
+                "title": "Updated At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "stage_id",
+              "conversation_key",
+              "introduced_job_id",
+              "introducing_sequence",
+              "name",
+              "version",
+              "kind",
+              "status",
+              "path",
+              "size_bytes",
+              "file_count",
+              "sha256",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "ConversationCompanionView",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "result": {
+            "items": {
+              "$ref": "#/$defs/ConversationCompanionView"
+            },
+            "title": "Result",
+            "type": "array"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "list_conversation_companionsOutput",
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_prompt_status",
+      "description": "Poll a queued/running/completed prompt without holding a connection.",
+      "inputSchema": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "get_prompt_statusArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CompanionStageKind": {
+            "enum": [
+              "file",
+              "archive",
+              "git"
+            ],
+            "title": "CompanionStageKind",
+            "type": "string"
+          },
+          "ConversationCompanionStatus": {
+            "enum": [
+              "pending",
+              "active",
+              "superseded"
+            ],
+            "title": "ConversationCompanionStatus",
+            "type": "string"
+          },
+          "ConversationCompanionView": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "stage_id": {
+                "description": "Opaque identifier for a single-use companion stage.",
+                "maxLength": 35,
+                "minLength": 35,
+                "pattern": "^cs_[0-9a-f]{32}$",
+                "title": "Stage Id",
+                "type": "string"
+              },
+              "conversation_key": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "title": "Conversation Key",
+                "type": "string"
+              },
+              "introduced_job_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Introduced Job Id"
+              },
+              "introducing_sequence": {
+                "minimum": 1,
+                "title": "Introducing Sequence",
+                "type": "integer"
+              },
+              "name": {
+                "description": "One safe path component used below /workspace/companions.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                "title": "Name",
+                "type": "string"
+              },
+              "version": {
+                "minimum": 1,
+                "title": "Version",
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/CompanionStageKind"
+              },
+              "status": {
+                "$ref": "#/$defs/ConversationCompanionStatus"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "size_bytes": {
+                "minimum": 0,
+                "title": "Size Bytes",
+                "type": "integer"
+              },
+              "file_count": {
+                "minimum": 0,
+                "title": "File Count",
+                "type": "integer"
+              },
+              "sha256": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Sha256",
+                "type": "string"
+              },
+              "resolved_git_commit": {
+                "anyOf": [
+                  {
+                    "maxLength": 64,
+                    "minLength": 40,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Resolved Git Commit"
+              },
+              "activated_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Activated At"
+              },
+              "superseded_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Superseded At"
+              },
+              "last_activation_error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Activation Error"
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              },
+              "updated_at": {
+                "format": "date-time",
+                "title": "Updated At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "stage_id",
+              "conversation_key",
+              "introduced_job_id",
+              "introducing_sequence",
+              "name",
+              "version",
+              "kind",
+              "status",
+              "path",
+              "size_bytes",
+              "file_count",
+              "sha256",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "ConversationCompanionView",
+            "type": "object"
+          },
+          "JobStatus": {
+            "enum": [
+              "queued",
+              "provisioning",
+              "waiting_for_lease",
+              "running",
+              "collecting",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "interrupted",
+              "expired"
+            ],
+            "title": "JobStatus",
+            "type": "string"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          },
+          "UsageTotals": {
+            "properties": {
+              "input_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Input Tokens",
+                "type": "integer"
+              },
+              "cached_input_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Cached Input Tokens",
+                "type": "integer"
+              },
+              "output_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Output Tokens",
+                "type": "integer"
+              },
+              "reasoning_output_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Reasoning Output Tokens",
+                "type": "integer"
+              }
+            },
+            "title": "UsageTotals",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "conversation_key": {
+            "title": "Conversation Key",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/JobStatus"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "description": "OpenAI model identifier selected for a conversation.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model selection snapshotted for this job, or null when inherited.",
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reasoning effort snapshotted for this job, or null when inherited."
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Result"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UsageTotals"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Completed At"
+          },
+          "companion_additions": {
+            "items": {
+              "$ref": "#/$defs/ConversationCompanionView"
+            },
+            "title": "Companion Additions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "agent_id",
+          "conversation_key",
+          "sequence",
+          "status",
+          "model",
+          "reasoning_effort",
+          "created_at"
+        ],
+        "title": "JobView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "cancel_prompt",
+      "description": "Cancel a queued prompt or request cancellation of a running one.",
+      "inputSchema": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "cancel_promptArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CompanionStageKind": {
+            "enum": [
+              "file",
+              "archive",
+              "git"
+            ],
+            "title": "CompanionStageKind",
+            "type": "string"
+          },
+          "ConversationCompanionStatus": {
+            "enum": [
+              "pending",
+              "active",
+              "superseded"
+            ],
+            "title": "ConversationCompanionStatus",
+            "type": "string"
+          },
+          "ConversationCompanionView": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "stage_id": {
+                "description": "Opaque identifier for a single-use companion stage.",
+                "maxLength": 35,
+                "minLength": 35,
+                "pattern": "^cs_[0-9a-f]{32}$",
+                "title": "Stage Id",
+                "type": "string"
+              },
+              "conversation_key": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                "title": "Conversation Key",
+                "type": "string"
+              },
+              "introduced_job_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Introduced Job Id"
+              },
+              "introducing_sequence": {
+                "minimum": 1,
+                "title": "Introducing Sequence",
+                "type": "integer"
+              },
+              "name": {
+                "description": "One safe path component used below /workspace/companions.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                "title": "Name",
+                "type": "string"
+              },
+              "version": {
+                "minimum": 1,
+                "title": "Version",
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/CompanionStageKind"
+              },
+              "status": {
+                "$ref": "#/$defs/ConversationCompanionStatus"
+              },
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "size_bytes": {
+                "minimum": 0,
+                "title": "Size Bytes",
+                "type": "integer"
+              },
+              "file_count": {
+                "minimum": 0,
+                "title": "File Count",
+                "type": "integer"
+              },
+              "sha256": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Sha256",
+                "type": "string"
+              },
+              "resolved_git_commit": {
+                "anyOf": [
+                  {
+                    "maxLength": 64,
+                    "minLength": 40,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Resolved Git Commit"
+              },
+              "activated_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Activated At"
+              },
+              "superseded_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Superseded At"
+              },
+              "last_activation_error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Activation Error"
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              },
+              "updated_at": {
+                "format": "date-time",
+                "title": "Updated At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "stage_id",
+              "conversation_key",
+              "introduced_job_id",
+              "introducing_sequence",
+              "name",
+              "version",
+              "kind",
+              "status",
+              "path",
+              "size_bytes",
+              "file_count",
+              "sha256",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "ConversationCompanionView",
+            "type": "object"
+          },
+          "JobStatus": {
+            "enum": [
+              "queued",
+              "provisioning",
+              "waiting_for_lease",
+              "running",
+              "collecting",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "interrupted",
+              "expired"
+            ],
+            "title": "JobStatus",
+            "type": "string"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          },
+          "UsageTotals": {
+            "properties": {
+              "input_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Input Tokens",
+                "type": "integer"
+              },
+              "cached_input_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Cached Input Tokens",
+                "type": "integer"
+              },
+              "output_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Output Tokens",
+                "type": "integer"
+              },
+              "reasoning_output_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Reasoning Output Tokens",
+                "type": "integer"
+              }
+            },
+            "title": "UsageTotals",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "conversation_key": {
+            "title": "Conversation Key",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/JobStatus"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "description": "OpenAI model identifier selected for a conversation.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model selection snapshotted for this job, or null when inherited.",
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reasoning effort snapshotted for this job, or null when inherited."
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Result"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UsageTotals"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Completed At"
+          },
+          "companion_additions": {
+            "items": {
+              "$ref": "#/$defs/ConversationCompanionView"
+            },
+            "title": "Companion Additions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "agent_id",
+          "conversation_key",
+          "sequence",
+          "status",
+          "model",
+          "reasoning_effort",
+          "created_at"
+        ],
+        "title": "JobView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_artifacts",
+      "description": "List immutable artifacts and their artifact:// resource URIs.",
+      "inputSchema": {
+        "properties": {
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Job Id"
+          },
+          "conversation_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Conversation Key"
+          }
+        },
+        "title": "list_artifactsArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "ArtifactView": {
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "conversation_key": {
+                "title": "Conversation Key",
+                "type": "string"
+              },
+              "relative_path": {
+                "title": "Relative Path",
+                "type": "string"
+              },
+              "media_type": {
+                "title": "Media Type",
+                "type": "string"
+              },
+              "size_bytes": {
+                "title": "Size Bytes",
+                "type": "integer"
+              },
+              "sha256": {
+                "title": "Sha256",
+                "type": "string"
+              },
+              "resource_uri": {
+                "title": "Resource Uri",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "job_id",
+              "conversation_key",
+              "relative_path",
+              "media_type",
+              "size_bytes",
+              "sha256",
+              "resource_uri"
+            ],
+            "title": "ArtifactView",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "result": {
+            "items": {
+              "$ref": "#/$defs/ArtifactView"
+            },
+            "title": "Result",
+            "type": "array"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "list_artifactsOutput",
+        "type": "object"
+      }
+    },
+    {
+      "name": "archive_conversation",
+      "description": "Archive a conversation after all of its jobs are terminal.",
+      "inputSchema": {
+        "properties": {
+          "conversation_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Conversation Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_key"
+        ],
+        "title": "archive_conversationArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "conversation_key": {
+            "title": "Conversation Key",
+            "type": "string"
+          },
+          "status": {
+            "const": "archived",
+            "default": "archived",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_key"
+        ],
+        "title": "ConversationArchived",
+        "type": "object"
+      }
+    },
+    {
+      "name": "delete_conversation",
+      "description": "Delete an inactive conversation and its isolated runtime data.",
+      "inputSchema": {
+        "properties": {
+          "conversation_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Conversation Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_key"
+        ],
+        "title": "delete_conversationArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "conversation_key": {
+            "title": "Conversation Key",
+            "type": "string"
+          },
+          "deleted": {
+            "const": true,
+            "default": true,
+            "title": "Deleted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "conversation_key"
+        ],
+        "title": "ConversationDeleted",
+        "type": "object"
+      }
+    },
+    {
+      "name": "configure_cron_schedule",
+      "description": "Create or atomically replace a cron schedule for an enabled agent.",
+      "inputSchema": {
+        "$defs": {
+          "CronConversationMode": {
+            "description": "Conversation continuity used by a cron schedule.",
+            "enum": [
+              "fresh",
+              "persistent"
+            ],
+            "title": "CronConversationMode",
+            "type": "string"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "schedule_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Schedule Id",
+            "type": "string"
+          },
+          "cron_expression": {
+            "maxLength": 255,
+            "minLength": 9,
+            "title": "Cron Expression",
+            "type": "string"
+          },
+          "agent_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "prompt": {
+            "maxLength": 2000000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "timezone": {
+            "default": "UTC",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Timezone",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "description": "OpenAI model identifier selected for a conversation.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "conversation_mode": {
+            "$ref": "#/$defs/CronConversationMode",
+            "default": "fresh"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "cron_expression",
+          "agent_id",
+          "prompt"
+        ],
+        "title": "configure_cron_scheduleArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CronConversationMode": {
+            "description": "Conversation continuity used by a cron schedule.",
+            "enum": [
+              "fresh",
+              "persistent"
+            ],
+            "title": "CronConversationMode",
+            "type": "string"
+          },
+          "CronLastFailure": {
+            "properties": {
+              "execution_id": {
+                "title": "Execution Id",
+                "type": "string"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "error": {
+                "title": "Error",
+                "type": "string"
+              },
+              "completed_at": {
+                "format": "date-time",
+                "title": "Completed At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution_id",
+              "status",
+              "error",
+              "completed_at"
+            ],
+            "title": "CronLastFailure",
+            "type": "object"
+          },
+          "CronScheduleStatus": {
+            "description": "Lifecycle state reported by the cron service.",
+            "enum": [
+              "enabled",
+              "disabled",
+              "deleting"
+            ],
+            "title": "CronScheduleStatus",
+            "type": "string"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "schedule_id": {
+            "title": "Schedule Id",
+            "type": "string"
+          },
+          "generation_id": {
+            "title": "Generation Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/CronScheduleStatus"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "cron_expression": {
+            "title": "Cron Expression",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "description": "OpenAI model identifier selected for a conversation.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "conversation_mode": {
+            "$ref": "#/$defs/CronConversationMode"
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "revision_id": {
+            "title": "Revision Id",
+            "type": "string"
+          },
+          "next_fire_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire At"
+          },
+          "active_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Execution Id"
+          },
+          "last_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Execution Id"
+          },
+          "pending_response_count": {
+            "minimum": 0,
+            "title": "Pending Response Count",
+            "type": "integer"
+          },
+          "skipped_occurrences": {
+            "minimum": 0,
+            "title": "Skipped Occurrences",
+            "type": "integer"
+          },
+          "last_failure": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CronLastFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "generation_id",
+          "status",
+          "enabled",
+          "cron_expression",
+          "timezone",
+          "agent_id",
+          "prompt",
+          "model",
+          "reasoning_effort",
+          "conversation_mode",
+          "revision",
+          "revision_id",
+          "next_fire_at",
+          "active_execution_id",
+          "last_execution_id",
+          "pending_response_count",
+          "skipped_occurrences",
+          "last_failure",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CronScheduleView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_cron_schedules",
+      "description": "List configured cron schedules and their current execution state.",
+      "inputSchema": {
+        "properties": {
+          "include_disabled": {
+            "default": false,
+            "title": "Include Disabled",
+            "type": "boolean"
+          }
+        },
+        "title": "list_cron_schedulesArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CronConversationMode": {
+            "description": "Conversation continuity used by a cron schedule.",
+            "enum": [
+              "fresh",
+              "persistent"
+            ],
+            "title": "CronConversationMode",
+            "type": "string"
+          },
+          "CronLastFailure": {
+            "properties": {
+              "execution_id": {
+                "title": "Execution Id",
+                "type": "string"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "error": {
+                "title": "Error",
+                "type": "string"
+              },
+              "completed_at": {
+                "format": "date-time",
+                "title": "Completed At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution_id",
+              "status",
+              "error",
+              "completed_at"
+            ],
+            "title": "CronLastFailure",
+            "type": "object"
+          },
+          "CronScheduleStatus": {
+            "description": "Lifecycle state reported by the cron service.",
+            "enum": [
+              "enabled",
+              "disabled",
+              "deleting"
+            ],
+            "title": "CronScheduleStatus",
+            "type": "string"
+          },
+          "CronScheduleView": {
+            "properties": {
+              "schedule_id": {
+                "title": "Schedule Id",
+                "type": "string"
+              },
+              "generation_id": {
+                "title": "Generation Id",
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/CronScheduleStatus"
+              },
+              "enabled": {
+                "title": "Enabled",
+                "type": "boolean"
+              },
+              "cron_expression": {
+                "title": "Cron Expression",
+                "type": "string"
+              },
+              "timezone": {
+                "title": "Timezone",
+                "type": "string"
+              },
+              "agent_id": {
+                "title": "Agent Id",
+                "type": "string"
+              },
+              "prompt": {
+                "title": "Prompt",
+                "type": "string"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "description": "OpenAI model identifier selected for a conversation.",
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Model"
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "conversation_mode": {
+                "$ref": "#/$defs/CronConversationMode"
+              },
+              "revision": {
+                "minimum": 1,
+                "title": "Revision",
+                "type": "integer"
+              },
+              "revision_id": {
+                "title": "Revision Id",
+                "type": "string"
+              },
+              "next_fire_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Next Fire At"
+              },
+              "active_execution_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Active Execution Id"
+              },
+              "last_execution_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Last Execution Id"
+              },
+              "pending_response_count": {
+                "minimum": 0,
+                "title": "Pending Response Count",
+                "type": "integer"
+              },
+              "skipped_occurrences": {
+                "minimum": 0,
+                "title": "Skipped Occurrences",
+                "type": "integer"
+              },
+              "last_failure": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CronLastFailure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              },
+              "updated_at": {
+                "format": "date-time",
+                "title": "Updated At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schedule_id",
+              "generation_id",
+              "status",
+              "enabled",
+              "cron_expression",
+              "timezone",
+              "agent_id",
+              "prompt",
+              "model",
+              "reasoning_effort",
+              "conversation_mode",
+              "revision",
+              "revision_id",
+              "next_fire_at",
+              "active_execution_id",
+              "last_execution_id",
+              "pending_response_count",
+              "skipped_occurrences",
+              "last_failure",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "CronScheduleView",
+            "type": "object"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "result": {
+            "items": {
+              "$ref": "#/$defs/CronScheduleView"
+            },
+            "title": "Result",
+            "type": "array"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "list_cron_schedulesOutput",
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_cron_schedule",
+      "description": "Get one cron schedule, including timing and response queue state.",
+      "inputSchema": {
+        "properties": {
+          "schedule_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Schedule Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id"
+        ],
+        "title": "get_cron_scheduleArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CronConversationMode": {
+            "description": "Conversation continuity used by a cron schedule.",
+            "enum": [
+              "fresh",
+              "persistent"
+            ],
+            "title": "CronConversationMode",
+            "type": "string"
+          },
+          "CronLastFailure": {
+            "properties": {
+              "execution_id": {
+                "title": "Execution Id",
+                "type": "string"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "error": {
+                "title": "Error",
+                "type": "string"
+              },
+              "completed_at": {
+                "format": "date-time",
+                "title": "Completed At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution_id",
+              "status",
+              "error",
+              "completed_at"
+            ],
+            "title": "CronLastFailure",
+            "type": "object"
+          },
+          "CronScheduleStatus": {
+            "description": "Lifecycle state reported by the cron service.",
+            "enum": [
+              "enabled",
+              "disabled",
+              "deleting"
+            ],
+            "title": "CronScheduleStatus",
+            "type": "string"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "schedule_id": {
+            "title": "Schedule Id",
+            "type": "string"
+          },
+          "generation_id": {
+            "title": "Generation Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/CronScheduleStatus"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "cron_expression": {
+            "title": "Cron Expression",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "description": "OpenAI model identifier selected for a conversation.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "conversation_mode": {
+            "$ref": "#/$defs/CronConversationMode"
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "revision_id": {
+            "title": "Revision Id",
+            "type": "string"
+          },
+          "next_fire_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire At"
+          },
+          "active_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Execution Id"
+          },
+          "last_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Execution Id"
+          },
+          "pending_response_count": {
+            "minimum": 0,
+            "title": "Pending Response Count",
+            "type": "integer"
+          },
+          "skipped_occurrences": {
+            "minimum": 0,
+            "title": "Skipped Occurrences",
+            "type": "integer"
+          },
+          "last_failure": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CronLastFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "generation_id",
+          "status",
+          "enabled",
+          "cron_expression",
+          "timezone",
+          "agent_id",
+          "prompt",
+          "model",
+          "reasoning_effort",
+          "conversation_mode",
+          "revision",
+          "revision_id",
+          "next_fire_at",
+          "active_execution_id",
+          "last_execution_id",
+          "pending_response_count",
+          "skipped_occurrences",
+          "last_failure",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CronScheduleView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "set_cron_schedule_enabled",
+      "description": "Pause or resume future occurrences without cancelling an active run.",
+      "inputSchema": {
+        "properties": {
+          "schedule_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Schedule Id",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "enabled"
+        ],
+        "title": "set_cron_schedule_enabledArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CronConversationMode": {
+            "description": "Conversation continuity used by a cron schedule.",
+            "enum": [
+              "fresh",
+              "persistent"
+            ],
+            "title": "CronConversationMode",
+            "type": "string"
+          },
+          "CronLastFailure": {
+            "properties": {
+              "execution_id": {
+                "title": "Execution Id",
+                "type": "string"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "error": {
+                "title": "Error",
+                "type": "string"
+              },
+              "completed_at": {
+                "format": "date-time",
+                "title": "Completed At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution_id",
+              "status",
+              "error",
+              "completed_at"
+            ],
+            "title": "CronLastFailure",
+            "type": "object"
+          },
+          "CronScheduleStatus": {
+            "description": "Lifecycle state reported by the cron service.",
+            "enum": [
+              "enabled",
+              "disabled",
+              "deleting"
+            ],
+            "title": "CronScheduleStatus",
+            "type": "string"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "schedule_id": {
+            "title": "Schedule Id",
+            "type": "string"
+          },
+          "generation_id": {
+            "title": "Generation Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/CronScheduleStatus"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "cron_expression": {
+            "title": "Cron Expression",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "description": "OpenAI model identifier selected for a conversation.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "conversation_mode": {
+            "$ref": "#/$defs/CronConversationMode"
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "revision_id": {
+            "title": "Revision Id",
+            "type": "string"
+          },
+          "next_fire_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire At"
+          },
+          "active_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Execution Id"
+          },
+          "last_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Execution Id"
+          },
+          "pending_response_count": {
+            "minimum": 0,
+            "title": "Pending Response Count",
+            "type": "integer"
+          },
+          "skipped_occurrences": {
+            "minimum": 0,
+            "title": "Skipped Occurrences",
+            "type": "integer"
+          },
+          "last_failure": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CronLastFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "generation_id",
+          "status",
+          "enabled",
+          "cron_expression",
+          "timezone",
+          "agent_id",
+          "prompt",
+          "model",
+          "reasoning_effort",
+          "conversation_mode",
+          "revision",
+          "revision_id",
+          "next_fire_at",
+          "active_execution_id",
+          "last_execution_id",
+          "pending_response_count",
+          "skipped_occurrences",
+          "last_failure",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CronScheduleView",
+        "type": "object"
+      }
+    },
+    {
+      "name": "delete_cron_schedule",
+      "description": "Delete a schedule now or mark it deleting until its active run ends.",
+      "inputSchema": {
+        "properties": {
+          "schedule_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Schedule Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id"
+        ],
+        "title": "delete_cron_scheduleArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "schedule_id": {
+            "title": "Schedule Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "deleted",
+              "deleting"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "status"
+        ],
+        "title": "CronScheduleDeleteResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "retrieve_cron_responses",
+      "description": "Lease successful responses; exactly one schedule or execution ID is required.",
+      "inputSchema": {
+        "properties": {
+          "schedule_id": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Schedule Id"
+          },
+          "execution_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 36,
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execution Id"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "retrieve_cron_responsesArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "CronResponse": {
+            "properties": {
+              "response_id": {
+                "title": "Response Id",
+                "type": "string"
+              },
+              "schedule_id": {
+                "title": "Schedule Id",
+                "type": "string"
+              },
+              "execution_id": {
+                "title": "Execution Id",
+                "type": "string"
+              },
+              "revision_id": {
+                "title": "Revision Id",
+                "type": "string"
+              },
+              "revision": {
+                "minimum": 1,
+                "title": "Revision",
+                "type": "integer"
+              },
+              "agent_id": {
+                "title": "Agent Id",
+                "type": "string"
+              },
+              "router_job_id": {
+                "title": "Router Job Id",
+                "type": "string"
+              },
+              "conversation_key": {
+                "title": "Conversation Key",
+                "type": "string"
+              },
+              "scheduled_for": {
+                "format": "date-time",
+                "title": "Scheduled For",
+                "type": "string"
+              },
+              "completed_at": {
+                "format": "date-time",
+                "title": "Completed At",
+                "type": "string"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "description": "OpenAI model identifier selected for a conversation.",
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Model"
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "usage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CronUsageTotals"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result": {
+                "title": "Result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "response_id",
+              "schedule_id",
+              "execution_id",
+              "revision_id",
+              "revision",
+              "agent_id",
+              "router_job_id",
+              "conversation_key",
+              "scheduled_for",
+              "completed_at",
+              "model",
+              "reasoning_effort",
+              "usage",
+              "result"
+            ],
+            "title": "CronResponse",
+            "type": "object"
+          },
+          "CronUsageTotals": {
+            "additionalProperties": true,
+            "description": "Usage returned by cron, preserving forward-compatible integer counters.",
+            "properties": {
+              "input_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Input Tokens",
+                "type": "integer"
+              },
+              "cached_input_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Cached Input Tokens",
+                "type": "integer"
+              },
+              "output_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Output Tokens",
+                "type": "integer"
+              },
+              "reasoning_output_tokens": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Reasoning Output Tokens",
+                "type": "integer"
+              }
+            },
+            "title": "CronUsageTotals",
+            "type": "object"
+          },
+          "ReasoningEffort": {
+            "description": "Codex reasoning effort selected for a conversation.",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "title": "ReasoningEffort",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "lease_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Id"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "responses": {
+            "items": {
+              "$ref": "#/$defs/CronResponse"
+            },
+            "title": "Responses",
+            "type": "array"
+          },
+          "more_available": {
+            "title": "More Available",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "lease_id",
+          "expires_at",
+          "responses",
+          "more_available"
+        ],
+        "title": "CronResponseLease",
+        "type": "object"
+      }
+    },
+    {
+      "name": "acknowledge_cron_responses",
+      "description": "Delete the responses in a valid lease; repeated acknowledgement is safe.",
+      "inputSchema": {
+        "properties": {
+          "lease_id": {
+            "maxLength": 36,
+            "minLength": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "title": "Lease Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lease_id"
+        ],
+        "title": "acknowledge_cron_responsesArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "lease_id": {
+            "title": "Lease Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "acknowledged",
+              "already_acknowledged",
+              "stale"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "deleted_count": {
+            "minimum": 0,
+            "title": "Deleted Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lease_id",
+          "status",
+          "deleted_count"
+        ],
+        "title": "CronResponseAcknowledgement",
+        "type": "object"
+      }
+    }
+  ]
+}

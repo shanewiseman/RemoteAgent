@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block body %}
+<main class="login-shell">
+  <section class="login-card" aria-labelledby="login-title">
+    <div class="brand-mark" aria-hidden="true">RA</div>
+    <p class="eyebrow">Internal operations</p>
+    <h1 id="login-title">RemoteAgent dashboard</h1>
+    <p class="muted">Exchange the router bearer token for a short-lived, HTTP-only browser session.</p>
+    {% if error %}<p class="alert" role="alert">{{ error }}</p>{% endif %}
+    {% if allow_form %}
+    <form method="post" action="/dashboard/session" class="stack">
+      <label for="token">Router bearer token</label>
+      <input id="token" name="token" type="password" required autocomplete="off" spellcheck="false">
+      <button type="submit">Sign in</button>
+    </form>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

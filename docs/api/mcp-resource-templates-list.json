@@ -1,0 +1,16 @@
+{
+  "resourceTemplates": [
+    {
+      "name": "agent_configuration",
+      "uriTemplate": "agent://{agent_id}/configuration",
+      "description": "",
+      "mimeType": "application/json"
+    },
+    {
+      "name": "agent_artifact",
+      "uriTemplate": "artifact://{artifact_id}",
+      "description": "",
+      "mimeType": "application/octet-stream"
+    }
+  ]
+}

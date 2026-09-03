@@ -1,0 +1,2686 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RemoteAgent Router",
+    "description": "Versioned RemoteAgent control API. The MCP protocol at `/mcp`, dashboard projection routes, and Prometheus metrics are documented separately and are not part of this OpenAPI contract.",
+    "version": "0.3.0"
+  },
+  "paths": {
+    "/api/v1/agents": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "List Agents",
+        "operationId": "agentsList",
+        "parameters": [
+          {
+            "name": "include_disabled",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Disabled"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentSummary"
+                  },
+                  "title": "Response Agentslist"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Register Agent",
+        "operationId": "agentsRegister",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentRegistration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A different definition is already registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{agent_id}": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Get Agent",
+        "operationId": "agentsGet",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{agent_id}/configuration": {
+      "patch": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Update Agent",
+        "operationId": "agentConfigurationUpdate",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Submit Job",
+        "operationId": "jobsSubmit",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent or companion stage not found, or the agent is disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conversation or companion stage state conflicts with this submission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "A companion or conversation companion limit would be exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Companion staging capacity is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "List Jobs",
+        "operationId": "jobsList",
+        "parameters": [
+          {
+            "name": "conversation_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Key"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/JobStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/JobView"
+                  },
+                  "title": "Response Jobslist"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/companion-stages/uploads": {
+      "post": {
+        "tags": [
+          "Companions"
+        ],
+        "summary": "Upload Companion Stage",
+        "description": "Stream an uploaded file or archive into a ready, single-use stage.",
+        "operationId": "companionStagesUpload",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "title": "Filename"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "enum": [
+                "file",
+                "archive"
+              ],
+              "type": "string",
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "sha256",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sha256"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanionStageView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The companion stage conflicts with current state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The uploaded or expanded companion exceeds a configured limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Companion staging capacity is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "Raw bytes for one ordinary file or supported archive.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/companion-stages/git-imports": {
+      "post": {
+        "tags": [
+          "Companions"
+        ],
+        "summary": "Import Git Companion Stage",
+        "description": "Queue a credential-free public HTTPS Git repository import.",
+        "operationId": "companionStagesGitImport",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanionStageView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The companion stage conflicts with current state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The imported repository exceeds a configured limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Companion staging capacity is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/companion-stages/{stage_id}": {
+      "get": {
+        "tags": [
+          "Companions"
+        ],
+        "summary": "Get Companion Stage",
+        "operationId": "companionStagesGet",
+        "parameters": [
+          {
+            "name": "stage_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 35,
+              "maxLength": 35,
+              "pattern": "^cs_[0-9a-f]{32}$",
+              "description": "Opaque identifier for a single-use companion stage.",
+              "title": "Stage Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanionStageView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Companion stage not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{conversation_key}/companions": {
+      "get": {
+        "tags": [
+          "Companions",
+          "Conversations"
+        ],
+        "summary": "List Conversation Companions",
+        "operationId": "conversationCompanionsList",
+        "parameters": [
+          {
+            "name": "conversation_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              "title": "Conversation Key"
+            }
+          },
+          {
+            "name": "include_history",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include History"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationCompanionView"
+                  },
+                  "title": "Response Conversationcompanionslist"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Get Job",
+        "operationId": "jobsGet",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}/cancel": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Cancel Job",
+        "operationId": "jobsCancel",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}/artifacts": {
+      "get": {
+        "tags": [
+          "Artifacts"
+        ],
+        "summary": "Job Artifacts",
+        "operationId": "jobArtifactsList",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ArtifactView"
+                  },
+                  "title": "Response Jobartifactslist"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{conversation_key}/archive": {
+      "post": {
+        "tags": [
+          "Conversations"
+        ],
+        "summary": "Archive Conversation",
+        "operationId": "conversationArchive",
+        "parameters": [
+          {
+            "name": "conversation_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Key"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conversation has active jobs or an invalid state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{conversation_key}": {
+      "delete": {
+        "tags": [
+          "Conversations"
+        ],
+        "summary": "Delete Conversation",
+        "operationId": "conversationDelete",
+        "parameters": [
+          {
+            "name": "conversation_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Key"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conversation has active jobs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts": {
+      "get": {
+        "tags": [
+          "Artifacts"
+        ],
+        "summary": "List Artifacts",
+        "operationId": "artifactsList",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "conversation_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ArtifactView"
+                  },
+                  "title": "Response Artifactslist"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}": {
+      "get": {
+        "tags": [
+          "Artifacts"
+        ],
+        "summary": "Artifact Metadata",
+        "operationId": "artifactsGet",
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artifact Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/content": {
+      "get": {
+        "tags": [
+          "Artifacts"
+        ],
+        "summary": "Artifact Content",
+        "operationId": "artifactContentGet",
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artifact Id"
+            }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "description": "Optional RFC 7233 byte range, for example `bytes=0-1023`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact bytes.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "const": "bytes"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, immutable"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `Bearer`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed byte range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Artifact storage is unavailable or violates policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "Requested byte range is not satisfiable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Requested artifact byte range.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "const": "bytes"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, immutable"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentDefinition": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4096,
+            "title": "Description",
+            "default": ""
+          },
+          "compose_file": {
+            "type": "string",
+            "format": "path",
+            "title": "Compose File"
+          },
+          "project_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Project Name"
+          },
+          "runner_service": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$",
+            "title": "Runner Service",
+            "default": "agent"
+          },
+          "dependency_services": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Dependency Services",
+            "default": []
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "config_toml": {
+            "type": "string",
+            "title": "Config Toml",
+            "default": ""
+          },
+          "base_context": {
+            "type": "string",
+            "maxLength": 1000000,
+            "title": "Base Context",
+            "default": ""
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Environment"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Labels"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "compose_file"
+        ],
+        "title": "AgentDefinition"
+      },
+      "AgentRegistration": {
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/AgentDefinition"
+          },
+          "replace": {
+            "type": "boolean",
+            "title": "Replace",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "definition"
+        ],
+        "title": "AgentRegistration"
+      },
+      "AgentSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "enabled",
+          "revision"
+        ],
+        "title": "AgentSummary"
+      },
+      "AgentView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "compose_file": {
+            "type": "string",
+            "title": "Compose File"
+          },
+          "project_name": {
+            "type": "string",
+            "title": "Project Name"
+          },
+          "runner_service": {
+            "type": "string",
+            "title": "Runner Service"
+          },
+          "dependency_services": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Dependency Services"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Environment"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Labels"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "config_toml": {
+            "type": "string",
+            "title": "Config Toml"
+          },
+          "base_context": {
+            "type": "string",
+            "title": "Base Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "enabled",
+          "revision",
+          "compose_file",
+          "project_name",
+          "runner_service",
+          "dependency_services",
+          "environment",
+          "labels",
+          "metadata",
+          "config_toml",
+          "base_context"
+        ],
+        "title": "AgentView"
+      },
+      "ArtifactView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "conversation_key": {
+            "type": "string",
+            "title": "Conversation Key"
+          },
+          "relative_path": {
+            "type": "string",
+            "title": "Relative Path"
+          },
+          "media_type": {
+            "type": "string",
+            "title": "Media Type"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "resource_uri": {
+            "type": "string",
+            "title": "Resource Uri"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "job_id",
+          "conversation_key",
+          "relative_path",
+          "media_type",
+          "size_bytes",
+          "sha256",
+          "resource_uri"
+        ],
+        "title": "ArtifactView"
+      },
+      "CompanionBinding": {
+        "properties": {
+          "stage_id": {
+            "type": "string",
+            "maxLength": 35,
+            "minLength": 35,
+            "pattern": "^cs_[0-9a-f]{32}$",
+            "title": "Stage Id",
+            "description": "Opaque identifier for a single-use companion stage."
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "title": "Name",
+            "description": "One safe path component used below /workspace/companions."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "stage_id",
+          "name"
+        ],
+        "title": "CompanionBinding",
+        "description": "Bind one ready, single-use stage to a conversation under a stable name."
+      },
+      "CompanionStageKind": {
+        "type": "string",
+        "enum": [
+          "file",
+          "archive",
+          "git"
+        ],
+        "title": "CompanionStageKind"
+      },
+      "CompanionStageStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "importing",
+          "ready",
+          "failed",
+          "claimed",
+          "expired"
+        ],
+        "title": "CompanionStageStatus"
+      },
+      "CompanionStageView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 35,
+            "minLength": 35,
+            "pattern": "^cs_[0-9a-f]{32}$",
+            "title": "Id",
+            "description": "Opaque identifier for a single-use companion stage."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CompanionStageKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CompanionStageStatus"
+          },
+          "source_metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Source Metadata"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "file_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Count"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          },
+          "resolved_git_commit": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 40
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved Git Commit"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "claimed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claimed At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "source_metadata",
+          "expires_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CompanionStageView"
+      },
+      "ConversationCompanionStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "active",
+          "superseded"
+        ],
+        "title": "ConversationCompanionStatus"
+      },
+      "ConversationCompanionView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "stage_id": {
+            "type": "string",
+            "maxLength": 35,
+            "minLength": 35,
+            "pattern": "^cs_[0-9a-f]{32}$",
+            "title": "Stage Id",
+            "description": "Opaque identifier for a single-use companion stage."
+          },
+          "conversation_key": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Conversation Key"
+          },
+          "introduced_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Introduced Job Id"
+          },
+          "introducing_sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Introducing Sequence"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "title": "Name",
+            "description": "One safe path component used below /workspace/companions."
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Version"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CompanionStageKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ConversationCompanionStatus"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Size Bytes"
+          },
+          "file_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "File Count"
+          },
+          "sha256": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256"
+          },
+          "resolved_git_commit": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 40
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved Git Commit"
+          },
+          "activated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated At"
+          },
+          "superseded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded At"
+          },
+          "last_activation_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activation Error"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "stage_id",
+          "conversation_key",
+          "introduced_job_id",
+          "introducing_sequence",
+          "name",
+          "version",
+          "kind",
+          "status",
+          "path",
+          "size_bytes",
+          "file_count",
+          "sha256",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ConversationCompanionView"
+      },
+      "GitImportRequest": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1024,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "title": "GitImportRequest",
+        "description": "Request a public Git repository import.\n\nURL scheme, address, credential, and ref policy require network-aware checks\nand are therefore enforced by the staging service."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "provisioning",
+          "waiting_for_lease",
+          "running",
+          "collecting",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "interrupted",
+          "expired"
+        ],
+        "title": "JobStatus"
+      },
+      "JobView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id"
+          },
+          "conversation_key": {
+            "type": "string",
+            "title": "Conversation Key"
+          },
+          "sequence": {
+            "type": "integer",
+            "title": "Sequence"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "description": "OpenAI model identifier selected for a conversation."
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "Model selection snapshotted for this job, or null when inherited."
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reasoning effort snapshotted for this job, or null when inherited."
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageTotals"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "companion_additions": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationCompanionView"
+            },
+            "type": "array",
+            "title": "Companion Additions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "agent_id",
+          "conversation_key",
+          "sequence",
+          "status",
+          "model",
+          "reasoning_effort",
+          "created_at"
+        ],
+        "title": "JobView"
+      },
+      "PromptAccepted": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "conversation_key": {
+            "type": "string",
+            "title": "Conversation Key"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "description": "OpenAI model identifier selected for a conversation."
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "Stored conversation model, or null when model selection is inherited."
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Stored conversation reasoning effort, or null when effort selection is inherited."
+          },
+          "companion_additions": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationCompanionView"
+            },
+            "type": "array",
+            "title": "Companion Additions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "conversation_key",
+          "status",
+          "model",
+          "reasoning_effort"
+        ],
+        "title": "PromptAccepted"
+      },
+      "PromptRequest": {
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Agent Id"
+          },
+          "prompt": {
+            "type": "string",
+            "maxLength": 2000000,
+            "minLength": 1,
+            "title": "Prompt"
+          },
+          "conversation_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Key"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "companions": {
+            "items": {
+              "$ref": "#/components/schemas/CompanionBinding"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Companions"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                "description": "OpenAI model identifier selected for a conversation."
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "Optional model for a new conversation. On continuation, an explicit value must equal the conversation's stored value."
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional reasoning effort for a new conversation. On continuation, an explicit value must equal the conversation's stored value."
+          }
+        },
+        "type": "object",
+        "required": [
+          "agent_id",
+          "prompt"
+        ],
+        "title": "PromptRequest"
+      },
+      "ReasoningEffort": {
+        "type": "string",
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ],
+        "title": "ReasoningEffort",
+        "description": "Codex reasoning effort selected for a conversation."
+      },
+      "RevisionUpdate": {
+        "properties": {
+          "config_toml": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config Toml"
+          },
+          "base_context": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Context"
+          }
+        },
+        "type": "object",
+        "title": "RevisionUpdate"
+      },
+      "UsageTotals": {
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "default": 0
+          },
+          "cached_input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Cached Input Tokens",
+            "default": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "default": 0
+          },
+          "reasoning_output_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Reasoning Output Tokens",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "UsageTotals"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Router bearer token generated by `remotectl init`."
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "{scheme}://{host}:{port}",
+      "description": "RemoteAgent router",
+      "variables": {
+        "scheme": {
+          "default": "http",
+          "enum": [
+            "http",
+            "https"
+          ]
+        },
+        "host": {
+          "default": "localhost"
+        },
+        "port": {
+          "default": "8080"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "Agents",
+      "description": "Agent discovery and immutable definitions."
+    },
+    {
+      "name": "Jobs",
+      "description": "Asynchronous prompt jobs and polling."
+    },
+    {
+      "name": "Conversations",
+      "description": "Conversation lifecycle operations."
+    },
+    {
+      "name": "Companions",
+      "description": "Persistent conversation-owned input files and repositories."
+    },
+    {
+      "name": "Artifacts",
+      "description": "Immutable agent-produced artifacts."
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ]
+}
