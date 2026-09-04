@@ -17,12 +17,31 @@ scripts/remotectl migrate status all
 scripts/remotectl agent list
 ```
 
-`doctor` also starts an ephemeral, network-disabled runner with a dummy
+`doctor` also starts an ephemeral, command-network-disabled runner with a dummy
 `auth.json`. It verifies that the image's managed requirements are immutable,
 Bubblewrap starts under the Compose security model, the dummy credential is
 unreadable to a sandboxed command, and the conversation workspace remains
-writable. This probe consumes no Codex subscription/API capacity and never
-mounts the real auth volume.
+writable. A separate no-network preflight verifies that the effective
+`code_mode_host` feature is enabled and its pinned executable sibling starts.
+These probes consume no Codex subscription/API capacity and never mount the
+real auth volume.
+
+After any managed-network, Codex CLI, or critic-image change, also run the
+non-model policy probe:
+
+```sh
+scripts/remotectl smoke network
+```
+
+It first proves ordinary container egress and private-service reachability, then
+proves default-agent denial to the otherwise allowlisted `example.com`, critic
+HTTPS access to that probe host, and critic loopback/private-service/Unix-socket
+denial through app-server `command/exec`; it also proves denial to one reachable
+unlisted public hostname. A separate source contract test pins the full
+allowlist (`example.com`, the Python and npm registries, and the Go proxy/sum
+service). The probe does not claim that plain HTTP or alternate ports/methods on
+an admitted host, link-local/metadata destinations, DNS rebinding,
+upstream-proxy bypass, or every possible Unix-socket path was actively probed.
 
 Credential-changing auth commands refuse to run while the router is active,
 because running jobs may be reading the shared Codex credential volume. Stop
@@ -227,11 +246,28 @@ unscoped `docker system prune`.
 ## Live smoke test
 
 ```sh
+scripts/remotectl smoke network
 scripts/remotectl smoke live --agent joke-agent --timeout 300
+scripts/remotectl smoke live --agent repository-critic --timeout 900
 ```
 
-The smoke workflow discovers the agent, submits one new asynchronous prompt,
+The joke workflow discovers the agent, submits one new asynchronous prompt,
 polls it, then submits a second turn with the same conversation key. Unique
 markers prove prompt transport and conversational memory; structural checks
-verify one `JOKE:` paragraph. It does not attempt to score humor. On failure it
-retains identifiers for diagnosis. The command refuses to run in CI.
+verify one `JOKE:` paragraph. It does not attempt to score humor.
+
+The critic workflow uploads a bounded repository companion whose documented
+authorization rule disagrees with its implementation and whose denial branch
+is untested. It verifies snapshot rather than pull-request framing, evidence
+links, test/coverage provenance, high-priority risk reporting, bounded artifact
+shape, unchanged companion content, and suppression of an install-hook
+sentinel. An unlocked dependency result must publish its generated lock and be
+marked non-reproducible.
+
+The network probe invokes no model and needs no Codex authentication, but it
+does require both built images and public Docker egress. Both `smoke live`
+commands refuse to run in CI and consume authenticated Codex capacity. On
+critic-smoke failure the stage, job, and conversation identifiers that exist
+are reported and retained for diagnosis. Review and remove any disclosed critic
+scratch residue before retrying; normal success cleans scratch and deletes the
+smoke conversation.

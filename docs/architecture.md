@@ -74,6 +74,15 @@ only successful terminal jobs create response records.
 Pollers must tolerate skipping transient states. The durable terminal states are
 `succeeded`, `failed`, `cancelled`, `interrupted`, and `expired`.
 
+The built-in repository critic is an ordinary instance of this lifecycle. It
+reviews one bound repository companion as a complete snapshot, copies it into
+job-scoped workspace scratch, runs image-baked Python/JavaScript/Go coverage
+adapters, and writes bounded report, coverage, provenance, and log artifacts.
+It adds no synchronous review route or cron path. Its immutable agent config is
+the sole checked-in command-network opt-in; the root-owned managed Codex policy
+supplies an exact six-host dependency/probe allowlist plus local/private
+destination denial while other agents remain command-network-off.
+
 ## Storage boundaries
 
 - PostgreSQL: authoritative application metadata and state.

@@ -17,6 +17,7 @@ LABEL org.opencontainers.image.title="RemoteAgent Codex runtime" \
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CODEX_HOME=/home/agent/.codex \
+    XDG_RUNTIME_DIR=/tmp/remoteagent-codex-runtime \
     REMOTEAGENT_WORKSPACE=/workspace \
     REMOTEAGENT_ARTIFACTS=/workspace/artifacts \
     REMOTEAGENT_SKILLS=/opt/remoteagent/skills
@@ -81,6 +82,19 @@ COPY --chmod=0444 runtime/codex-requirements.toml /etc/codex/requirements.toml
 COPY --chown=agent common-skills/ /opt/remoteagent/skills/
 COPY --chown=agent runtime/codex-config.toml /home/agent/.codex/config.toml
 COPY --chmod=0755 runtime/agent-entrypoint.sh /usr/local/bin/remoteagent-agent-entrypoint
+
+# A model profile may require Codex's stable local code-mode host even though
+# the user-selectable code_mode experiment stays disabled. Fail the image build
+# if either the managed feature state or its pinned companion binary is absent.
+RUN codex_features="$(codex features list)" \
+    && printf '%s\n' "$codex_features" \
+        | grep -Eq '^code_mode_host[[:space:]]+stable[[:space:]]+true$' \
+    && codex_native_path="$(find /usr/local/lib/node_modules/@openai/codex \
+        -type f -name codex -perm -u+x -print -quit)" \
+    && test -n "$codex_native_path" \
+    && code_mode_host_path="$(dirname "$codex_native_path")/codex-code-mode-host" \
+    && test -x "$code_mode_host_path" \
+    && "$code_mode_host_path" --help >/dev/null
 
 USER agent
 WORKDIR /workspace

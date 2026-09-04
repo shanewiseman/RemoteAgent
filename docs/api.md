@@ -146,10 +146,14 @@ Registration is idempotent when the submitted definition is unchanged. A
 different definition returns `409` unless `replace` is true. Replacement creates
 a new immutable revision only when the effective definition differs.
 
-Agent-managed Codex TOML accepts only the fail-closed scalar settings described
-in [Agent authoring](agent-authoring.md). Custom providers, endpoints, hooks,
-MCP servers, plugins, path readers, permission profiles, and extra writable roots
-are rejected with `422`.
+Agent-managed Codex TOML accepts the fail-closed settings described in
+[Agent authoring](agent-authoring.md). Its only structured exception is the
+exact table `[sandbox_workspace_write] network_access = <boolean>`; `true`
+requires an explicit top-level `sandbox_mode = "workspace-write"`. Custom
+providers, endpoints, hooks, MCP servers, plugins, path readers, permission
+profiles, extra writable roots, other table members, and all other structured
+settings are rejected with `422`. This changes validation semantics only; the
+wire field remains the revisioned `config_toml` string.
 
 Update config or context without replacing the structural definition:
 
@@ -167,6 +171,20 @@ An omitted or `null` field preserves its current value. A no-op update does not
 create another revision. `base_context` is limited to 1,000,000 characters.
 
 ### Asynchronous prompts and conversations
+
+The built-in `repository-critic` uses the same asynchronous endpoint and
+companion binding as every other agent. Bind a staged repository with the name
+`repository` (or name it explicitly in the prompt), submit a snapshot-review
+request, poll the job, and list/download its artifacts. It does not accept a PR
+number, base commit, or diff contract. Cron cannot schedule this workflow in V1
+because the scoped cron role cannot bind companions.
+
+Repository test code executes inside the normal trusted runner boundary. The
+critic suppresses package lifecycle/build/generate hooks unless the current
+prompt contains exactly `ALLOW_REPOSITORY_BUILD_HOOKS=true`. This is a prompt
+convention, not a new request field. Coverage and provenance are ordinary
+artifacts, so the existing count, size, retention, MCP-read, and REST range
+rules apply unchanged.
 
 #### Conversation execution profile
 

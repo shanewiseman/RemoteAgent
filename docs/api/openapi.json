@@ -3,7 +3,7 @@
   "info": {
     "title": "RemoteAgent Router",
     "description": "Versioned RemoteAgent control API. The MCP protocol at `/mcp`, dashboard projection routes, and Prometheus metrics are documented separately and are not part of this OpenAPI contract.",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
   "paths": {
     "/api/v1/agents": {

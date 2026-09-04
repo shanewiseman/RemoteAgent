@@ -239,7 +239,8 @@ class DockerComposeRuntime:
         container_output = (
             f"{self.settings.workspace_container_path}/.remoteagent/jobs/{request.job_id}/final.txt"
         )
-        configured_sandbox = tomllib.loads(request.definition.config_toml or "").get("sandbox_mode")
+        configured = tomllib.loads(request.definition.config_toml or "")
+        configured_sandbox = configured.get("sandbox_mode")
         order = {
             "read-only": 0,
             "workspace-write": 1,
@@ -257,6 +258,21 @@ class DockerComposeRuntime:
             "-c",
             'approval_policy="never"',
         ]
+        workspace_write = configured.get("sandbox_workspace_write")
+        network_enabled = (
+            isinstance(workspace_write, dict) and workspace_write.get("network_access") is True
+        )
+        effective_network = effective_sandbox == "workspace-write" and network_enabled
+        # Codex 0.149.1 does not reliably materialize the static nested config
+        # value for `codex exec`. Repeat the already validated, immutable
+        # revision value as an explicit one-run Boolean in both directions.
+        common.extend(
+            [
+                "-c",
+                "sandbox_workspace_write.network_access="
+                + ("true" if effective_network else "false"),
+            ]
+        )
         if request.model is not None:
             common.extend(["--model", request.model])
         if request.reasoning_effort is not None:

@@ -96,7 +96,8 @@ class CronScheduleStatus(StrEnum):
 
 
 # Agent-managed config is consumed by the Codex parent process, not solely by
-# commands inside its sandbox. Keep this V1 surface deliberately fail-closed:
+# commands inside its sandbox. Except for the exact workspace network opt-in
+# validated below, keep this V1 surface deliberately fail-closed:
 # provider/auth endpoints, executable notifications/hooks, MCP/plugins/apps,
 # profiles/permissions, writable-root grants, and host path readers are not
 # safe for bearer-authorized runtime mutation.
@@ -118,6 +119,7 @@ SAFE_CODEX_CONFIG_KEYS = frozenset(
         "plan_mode_reasoning_effort",
         "review_model",
         "sandbox_mode",
+        "sandbox_workspace_write",
         "service_tier",
         "show_raw_agent_reasoning",
         "tool_output_token_limit",
@@ -137,7 +139,11 @@ def validate_codex_config_toml(value: str) -> str:
     unsafe = set(document) - SAFE_CODEX_CONFIG_KEYS
     if unsafe:
         raise ValueError(f"unsupported or unsafe Codex config keys: {sorted(unsafe)}")
-    nested = sorted(key for key, item in document.items() if isinstance(item, (dict, list)))
+    nested = sorted(
+        key
+        for key, item in document.items()
+        if key != "sandbox_workspace_write" and isinstance(item, (dict, list))
+    )
     if nested:
         raise ValueError(f"unsupported structured Codex config keys: {nested}")
     credentials_store = document.get("cli_auth_credentials_store")
@@ -153,6 +159,25 @@ def validate_codex_config_toml(value: str) -> str:
         "workspace-write",
     ):
         raise ValueError("invalid sandbox_mode")
+    workspace_write = document.get("sandbox_workspace_write")
+    if workspace_write is not None:
+        if not isinstance(workspace_write, dict):
+            raise ValueError("sandbox_workspace_write must be a table")
+        unsafe_workspace_write = set(workspace_write) - {"network_access"}
+        if unsafe_workspace_write:
+            raise ValueError(
+                "unsupported or unsafe sandbox_workspace_write keys: "
+                f"{sorted(unsafe_workspace_write)}"
+            )
+        if set(workspace_write) != {"network_access"}:
+            raise ValueError("sandbox_workspace_write must contain only network_access")
+        network_access = workspace_write["network_access"]
+        if type(network_access) is not bool:
+            raise ValueError("sandbox_workspace_write.network_access must be a boolean")
+        if network_access and sandbox != "workspace-write":
+            raise ValueError(
+                "sandbox_workspace_write.network_access requires sandbox_mode = 'workspace-write'"
+            )
     _execution_profile_from_document(document)
     return value
 

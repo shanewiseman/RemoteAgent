@@ -110,7 +110,10 @@ def test_seeded_joke_agent_authenticated_async_continuation(tmp_path: Path) -> N
         assert unauthorized.status_code == 401
         discovery = client.get("/api/v1/agents", headers=headers)
         assert discovery.status_code == 200
-        assert [agent["id"] for agent in discovery.json()] == [FIXTURE["agent_id"]]
+        assert [agent["id"] for agent in discovery.json()] == [
+            FIXTURE["agent_id"],
+            "repository-critic",
+        ]
 
         first_accepted = client.post(
             "/api/v1/jobs",

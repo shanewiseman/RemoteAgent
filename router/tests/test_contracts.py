@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,7 +10,7 @@ import pytest
 
 from remoteagent.app import create_app
 from remoteagent.config import Settings
-from remoteagent.contracts import contract_documents
+from remoteagent.contracts import API_VERSION, contract_documents
 from remoteagent.mcp_server import build_mcp
 from remoteagent.schemas import AgentSummary, AgentView
 
@@ -23,6 +25,20 @@ async def test_checked_in_client_contracts_match_implementation() -> None:
         assert checked_in == document, (
             f"{name} is stale; run `make api-contracts` from the repository root"
         )
+
+
+def test_router_release_version_is_consistent_across_independent_contracts() -> None:
+    repository = Path(__file__).parents[2]
+    with (repository / "router" / "pyproject.toml").open("rb") as handle:
+        package_version = tomllib.load(handle)["project"]["version"]
+    openapi_version = json.loads(
+        (repository / "docs" / "api" / "openapi.json").read_text(encoding="utf-8")
+    )["info"]["version"]
+    requirements = (repository / "docs" / "requirements.md").read_text(encoding="utf-8")
+    release = re.search(r"\| Product release \| RemoteAgent ([0-9.]+) /", requirements)
+
+    assert release is not None
+    assert {package_version, API_VERSION, openapi_version, release.group(1)} == {"0.4.0"}
 
 
 @pytest.mark.asyncio
@@ -68,9 +84,7 @@ async def test_mcp_contract_has_precise_output_schemas() -> None:
     for name in ("stage_git_repository", "get_companion_stage"):
         companion_tool = next(tool for tool in tools if tool["name"] == name)
         assert companion_tool["outputSchema"]["title"] == "CompanionStageView"
-    companion_list = next(
-        tool for tool in tools if tool["name"] == "list_conversation_companions"
-    )
+    companion_list = next(tool for tool in tools if tool["name"] == "list_conversation_companions")
     assert companion_list["outputSchema"]["type"] == "object"
 
 

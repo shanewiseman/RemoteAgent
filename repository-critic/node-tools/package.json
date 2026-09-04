@@ -1,0 +1,11 @@
+{
+  "name": "remoteagent-repository-critic-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Image-baked, integrity-locked Node coverage and package-manager tools",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "c8": "12.0.0",
+    "corepack": "0.36.0"
+  }
+}

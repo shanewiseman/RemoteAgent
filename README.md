@@ -9,8 +9,11 @@ agent-created files as MCP resources. Callers can also stage documents,
 archives, or public HTTPS Git repositories and bind them to a turn as editable
 conversation companions.
 
-The repository includes a default-enabled `joke-agent` that provides one clean,
-prompt-influenced joke and doubles as a manual end-to-end smoke test.
+The repository includes two default-enabled built-ins: `joke-agent` provides
+one clean, prompt-influenced joke and doubles as the continuation smoke target;
+`repository-critic` reviews a complete repository companion against its own
+documentation, runs supported tests and coverage, and publishes evidence-backed
+review artifacts without using pull-request or diff framing.
 
 The maintained documentation index is [docs/README.md](docs/README.md). The
 [requirements baseline](docs/requirements.md) is the starting point for scoped
@@ -136,13 +139,26 @@ scripts/remotectl migrate status all
 scripts/remotectl token status all
 scripts/remotectl agent list
 scripts/remotectl agent validate joke-agent
+scripts/remotectl agent validate repository-critic
 scripts/remotectl backup create
 scripts/remotectl cleanup                 # dry-run
+scripts/remotectl smoke network
 scripts/remotectl smoke live --agent joke-agent
+scripts/remotectl smoke live --agent repository-critic --timeout 900
 ```
 
-Live smoke consumes authenticated Codex subscription capacity and is hard
-disabled in CI. Ordinary tests use a deterministic fake runner.
+The network smoke invokes app-server `command/exec` directly and consumes no
+model or authentication capacity. Live smoke consumes authenticated Codex
+subscription capacity and is hard disabled in CI. Ordinary tests use a
+deterministic fake runner.
+
+The critic is the only checked-in agent that opts into managed command
+networking, used for credential-free project dependencies in disposable
+scratch. Other agents remain network-off. The native Codex policy admits only
+`example.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`,
+`proxy.golang.org`, and `sum.golang.org`. Filtering is by hostname rather than
+scheme, port, or method, so use a separate host or L7 egress control if stricter
+protocol enforcement is required.
 
 See the [requirements baseline](docs/requirements.md), [API contract](docs/api.md),
 [Docker runtime contract](docs/docker-runtime.md), [deployment](docs/deployment.md),

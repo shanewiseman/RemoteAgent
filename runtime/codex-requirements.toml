@@ -10,13 +10,30 @@ allow_managed_hooks_only = true
 allow_appshots = false
 allow_remote_control = false
 
+# Constraints for the managed proxy. Deliberately omit `enabled`: Codex 0.149.1
+# interprets a managed `enabled = true` as an unconditional network grant. The
+# feature flag below loads the proxy implementation; the router repeats each
+# validated revision's sandbox_workspace_write.network_access Boolean as an
+# explicit per-run override so the immutable revision remains authoritative.
+[experimental_network]
+domains = { "example.com" = "allow", "pypi.org" = "allow", "files.pythonhosted.org" = "allow", "registry.npmjs.org" = "allow", "proxy.golang.org" = "allow", "sum.golang.org" = "allow" }
+managed_allowed_domains_only = true
+allow_local_binding = false
+allow_upstream_proxy = false
+dangerously_allow_non_loopback_proxy = false
+dangerously_allow_all_unix_sockets = false
+
 # An empty managed allowlist disables config- and plugin-provided MCP servers.
 # MCP processes run beside Codex rather than inside the local command sandbox.
 [mcp_servers]
 
 # These integrations can launch host-side processes or read files outside the
 # command sandbox. RemoteAgent V1 deliberately exposes only sandboxed local
-# tools plus Codex-owned model/web traffic.
+# tools plus Codex-owned model/web traffic. The one explicit exception is
+# Codex's bundled local code-mode host: Codex 0.149.1 model metadata can select
+# code-mode tools even while the user-selectable `code_mode` feature is false,
+# and those tools fail closed if their local V8 host is disabled. Nested OS
+# tool calls still return to Codex for the normal managed sandbox policy.
 [features]
 apps = false
 enable_mcp_apps = false
@@ -25,7 +42,7 @@ remote_plugin = false
 plugin_sharing = false
 hooks = false
 code_mode = false
-code_mode_host = false
+code_mode_host = true
 browser_use = false
 browser_use_full_cdp_access = false
 browser_use_external = false
@@ -33,6 +50,7 @@ computer_use = false
 image_generation = false
 skill_mcp_dependency_install = false
 recommended_plugins = false
+network_proxy = true
 
 [permissions.filesystem]
 deny_read = ["/home/agent/.codex/*auth*"]

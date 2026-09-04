@@ -1,0 +1,7 @@
+# Direct image-baked tool requirements. python-tools.lock is the authoritative,
+# fully resolved and hashed installation input.
+coverage==7.16.0
+pytest-cov==7.1.0
+uv==0.12.9
+poetry==2.4.2
+pipenv==2026.8.0

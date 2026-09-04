@@ -1,0 +1,22 @@
+#!/bin/sh
+# Corepack 0.36 requires a newer Node patch release than the repository test
+# runtime. Keep that support runtime private: only Corepack and the package
+# managers it dispatches execute through it; project commands still use the
+# image's published Node 22.19.0 runtime.
+set -eu
+
+tool=${0##*/}
+case "$tool" in
+    corepack-shim)
+        tool=corepack
+        ;;
+    corepack|pnpm|pnpx|yarn|yarnpkg)
+        ;;
+    *)
+        echo "unsupported Corepack shim invocation: $tool" >&2
+        exit 64
+        ;;
+esac
+
+exec /opt/remoteagent/corepack-node/node \
+    "/opt/remoteagent/node-tools/node_modules/corepack/dist/${tool}.js" "$@"

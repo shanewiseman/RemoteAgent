@@ -1,0 +1,74 @@
+name: remoteagent-repository-critic
+
+services:
+  agent:
+    image: remoteagent/repository-critic:${REMOTEAGENT_VERSION:-local}
+    build:
+      context: ..
+      dockerfile: repository-critic/Dockerfile
+      network: ${REMOTEAGENT_BUILD_NETWORK:-default}
+      args:
+        REMOTEAGENT_VERSION: ${REMOTEAGENT_VERSION:-local}
+    profiles: ["runner"]
+    user: ${REMOTEAGENT_UID:-1000}:${REMOTEAGENT_GID:-1000}
+    environment:
+      CODEX_HOME: /home/agent/.codex
+      COREPACK_HOME: /opt/remoteagent/corepack
+      GOTOOLCHAIN: local
+      REMOTEAGENT_AGENT_ID: repository-critic
+      REMOTEAGENT_REVIEW_MODE: repository_snapshot
+      REMOTEAGENT_WORKSPACE: /workspace
+      REMOTEAGENT_SESSIONS: /home/agent/.codex/sessions
+      REMOTEAGENT_ARTIFACTS: /workspace/artifacts
+      REMOTEAGENT_SKILLS: /opt/remoteagent/skills
+      REMOTEAGENT_JOB_ID: ${REMOTEAGENT_JOB_ID:-manual-validation}
+      REMOTEAGENT_CONVERSATION_KEY: ${REMOTEAGENT_CONVERSATION_KEY:-manual-validation}
+    volumes:
+      - type: volume
+        source: codex-auth
+        target: /home/agent/.codex
+      - type: bind
+        source: ${REMOTEAGENT_SESSIONS_PATH:-../.runtime/empty/sessions}
+        target: /home/agent/.codex/sessions
+      - type: bind
+        source: ${REMOTEAGENT_WORKSPACE_PATH:-../.runtime/empty/workspace}
+        target: /workspace
+      - type: bind
+        source: ${REMOTEAGENT_ARTIFACTS_PATH:-../.runtime/empty/artifacts}
+        target: /workspace/artifacts
+      - type: volume
+        source: common-skills
+        target: /opt/remoteagent/skills
+        read_only: true
+    networks:
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+      # Codex's nested Bubblewrap sandbox requires these settings. The
+      # root-owned Codex policy remains the effective security ceiling.
+      - seccomp=unconfined
+      - apparmor=unconfined
+    pids_limit: 256
+    mem_limit: ${REMOTEAGENT_AGENT_MEMORY_LIMIT:-2g}
+    cpus: ${REMOTEAGENT_AGENT_CPU_LIMIT:-2.0}
+    labels:
+      io.remoteagent.managed: "true"
+      io.remoteagent.instance: ${REMOTEAGENT_INSTANCE_ID:-remoteagent}
+      io.remoteagent.agent.id: repository-critic
+      io.remoteagent.job.id: ${REMOTEAGENT_JOB_ID:-manual-validation}
+      io.remoteagent.conversation.key: ${REMOTEAGENT_CONVERSATION_KEY:-manual-validation}
+
+networks:
+  egress: {}
+
+volumes:
+  codex-auth:
+    external: true
+    name: ${REMOTEAGENT_AUTH_VOLUME:-remoteagent-codex-auth}
+  common-skills:
+    external: true
+    name: ${REMOTEAGENT_SKILLS_VOLUME:-remoteagent-common-skills}

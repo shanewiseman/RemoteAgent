@@ -7,6 +7,12 @@ from typing import Any
 from .schemas import AgentDefinition
 
 
+def _require_schema_version(document: dict[str, Any], *, kind: str) -> None:
+    version = document.get("schema_version")
+    if type(version) is not int or version != 1:
+        raise ValueError(f"{kind} requires integer schema_version = 1")
+
+
 def _safe_child(base: Path, value: str | Path, *, kind: str, must_exist: bool = True) -> Path:
     candidate = Path(value)
     if candidate.is_absolute():
@@ -97,6 +103,7 @@ def _definition_from_entry(raw_entry: dict[str, Any], agents_root: Path) -> Agen
             manifest_values = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"cannot load manifest {manifest_path}: {exc}") from exc
+    _require_schema_version(manifest_values, kind=f"manifest {manifest_path}")
     if "agent" in manifest_values:
         manifest_values = manifest_values["agent"]
     if not isinstance(manifest_values, dict):
@@ -122,6 +129,7 @@ def _phonebook_entries(path: Path) -> list[Any]:
             document = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"cannot load phonebook {path}: {exc}") from exc
+    _require_schema_version(document, kind=f"phonebook {path}")
     entries = document.get("agents", [])
     if not isinstance(entries, list):
         raise TypeError("phonebook 'agents' must be an array of tables")

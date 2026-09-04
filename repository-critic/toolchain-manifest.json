@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "revision": "2026-09-02",
+  "architectures": ["linux/amd64", "linux/arm64"],
+  "runtimes": {
+    "python": "3.12.14",
+    "node": "22.19.0",
+    "npm": "10.9.3",
+    "go": "1.27.1"
+  },
+  "support_runtimes": {
+    "corepack_node": "22.22.2"
+  },
+  "coverage_tools": {
+    "coverage.py": "7.16.0",
+    "pytest-cov": "7.1.0",
+    "c8": "12.0.0",
+    "go-cover": "go1.27.1"
+  },
+  "package_managers": {
+    "uv": ["0.12.9"],
+    "poetry": ["2.4.2"],
+    "pipenv": ["2026.8.0"],
+    "npm": ["10.9.3"],
+    "corepack": ["0.36.0"],
+    "yarn": ["1.22.22", "4.18.0"],
+    "pnpm": ["9.15.9", "10.34.5", "11.25.0"]
+  },
+  "source_images": {
+    "python": "python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254",
+    "go": "golang:1.27.1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b",
+    "corepack_node": "node:22.22.2-bookworm-slim@sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e"
+  },
+  "runtime_policy": {
+    "arbitrary_coverage_downloads": false,
+    "default_build_hooks": false,
+    "default_restore": "locked",
+    "unlocked_restore_label": "resolved_unlocked",
+    "python_tool_integrity": "checked-in transitive SHA-256 requirement locks",
+    "node_tool_integrity": "checked-in npm lockfileVersion 3 registry integrities",
+    "corepack_cache_integrity": "Corepack-verified registry metadata at image build; cache archive integrity is not independently checked in",
+    "corepack_runtime": "Corepack 0.36.0 and its dispatched managers use isolated Node 22.22.2; repository commands use Node 22.19.0"
+  }
+}

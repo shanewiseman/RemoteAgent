@@ -263,7 +263,9 @@ matches its lowercase agent ID:
 ├── compose.yaml
 ├── Dockerfile
 ├── AGENTS.md
-└── config.toml
+├── config.toml
+├── references/        # optional image-baked guidance
+└── tools/             # optional image-baked executables
 ```
 
 The supported helper requires the Compose filename to be exactly `compose.yaml`,
@@ -303,8 +305,11 @@ The runner service MUST:
 - avoid `container_name`; the router supplies a unique job name at runtime;
 - avoid host-published ports;
 - avoid the Docker socket and all unrelated host paths; and
-- contain all executable dependencies before a prompt is accepted for live
-  processing. Runtime package installation is not supported.
+- contain all agent executable dependencies before a prompt is accepted for
+  live processing. A reviewed network-enabled agent may restore only the target
+  project's dependencies into bounded workspace scratch under the controlled
+  restoration contract below; image mutation and arbitrary executable-tool
+  downloads remain unsupported.
 
 Manifest `[environment]` values are passed to the Docker Compose CLI as safe
 interpolation inputs. They are **not** automatically injected into the runner.
@@ -350,6 +355,16 @@ to remove the non-root user, read-only root, capability drop,
 `no-new-privileges`, limits, isolated mounts, or the root-owned managed Codex
 requirements file.
 
+The image also pins Codex's bundled `codex-code-mode-host` executable and enables
+only that stable local host feature while leaving the optional `code_mode`
+experiment disabled. Codex 0.149.1 can receive a model profile that selects
+code-mode tools independently of the local experiment flag; the host is needed
+to service that profile. It is a local sandbox-enabled V8 orchestration process,
+not a remote code-mode endpoint: imports and Node APIs are unavailable, and
+nested OS tool calls return to Codex's normal managed command sandbox. Image
+builds and `remotectl doctor` both fail if the effective feature or companion
+binary is missing.
+
 An agent Compose project MUST NOT use:
 
 - `privileged: true`;
@@ -368,6 +383,43 @@ Compose validation resolves the real Compose model, verifies required service
 names, and verifies a basic dependency healthcheck, but it does not yet reject
 unsafe mounts, namespaces, privileges, ports, users, capabilities, missing
 limits, or an unexpected image.
+
+### Managed command networking and project restoration
+
+`/etc/codex/requirements.toml` enables Codex's `network_proxy` feature and
+supplies managed constraints with exact entries for `example.com`, `pypi.org`,
+`files.pythonhosted.org`, `registry.npmjs.org`, `proxy.golang.org`, and
+`sum.golang.org`, while retaining the local-address, upstream-proxy,
+non-loopback-proxy, and Unix-socket denials.
+A global `*` entry is intentionally absent because Codex 0.149.1 rejects it.
+The managed `experimental_network.enabled` key is also intentionally absent:
+Codex 0.149.1 treats `true` as unconditional and `false` as an absolute denial.
+The router repeats an explicit per-run `sandbox_workspace_write.network_access`
+Boolean to work around that version's nested static-config materialization bug.
+It emits `true` only when an agent's immutable `config.toml` contains both
+`sandbox_mode="workspace-write"` and
+`[sandbox_workspace_write].network_access=true`. The template and joke agent do
+not opt in; the repository critic does. Codex proxy runtime state is created mode
+0700 at `/tmp/remoteagent-codex-runtime` inside the existing per-container tmpfs,
+so no writable mount is added.
+
+The proxy filters destinations by exact hostname. It does not restrict scheme,
+port, method, process, payload size, or lockfile state for an admitted host. A
+network-enabled agent must therefore use credential-free HTTPS dependency
+sources by its own reviewed workflow, and deployment documentation must not
+claim that plain HTTP or alternate ports are blocked for those hosts. A host/L7
+egress control is required for those stronger guarantees.
+
+The repository critic restores dependencies only beneath
+`/workspace/.repository-critic/$REMOTEAGENT_JOB_ID`, redirects every package and
+compiler cache there, and leaves the companion and read-only root unchanged.
+Agent/coverage executables are image-baked. Locked resolution is preferred;
+unlocked resolution and generated locks stay in scratch and are published as
+non-reproducible provenance. Install/lifecycle/build/generate hooks require the
+current caller's explicit `ALLOW_REPOSITORY_BUILD_HOOKS=true` sentinel. Tests
+run with proxy variables removed. Commands are process-group bounded and the
+critic continues its static report when restoration, testing, or coverage is
+blocked.
 
 ### Required Docker labels
 
@@ -589,9 +641,10 @@ exact root or agent project.
 | `remotectl restore FILE --yes` | Stops cron/router/Redis, transactionally replaces the application schema, swaps state trees, then starts router before cron | Destructively replaces backed-up state including cron state | No automatic pre-restore backup; successful restore returns both services healthy |
 | `remotectl cleanup` | Lists old exited/dead instance-labelled managed containers | Dry-run only | Does not inspect or delete data |
 | `remotectl cleanup --apply --yes` | Removes only selected terminal labelled containers | Container deletion only | Does not stop running sidecars or remove volumes/networks |
-| `remotectl doctor` | Read-only inspection plus no-network sandbox/auth probes and authenticated cron readiness | None | Safe; cron readiness proves database/schema/scoped-MCP connectivity |
+| `remotectl doctor` | Read-only inspection plus default network-off sandbox/auth probes, local code-mode host preflight, and authenticated cron readiness | None | Safe; cron readiness proves database/schema/scoped-MCP connectivity; run the separate managed-network probe for an opted-in agent. |
 | `remotectl upgrade apply --yes` | Cron quiesce, idle router stop, backup, pull/build all, recreate router then cron with health wait | New images and a pre-upgrade backup | Run idempotent `init --non-interactive` first after a 0.1 checkout switch; then clean-tree and idle checks apply |
 | `remotectl smoke live` | Runs two normal asynchronous turns through the router | Deletes a successful smoke conversation unless `--keep`; failed smoke identifiers are retained | Consumes authenticated Codex capacity; disabled in CI |
+| `remotectl smoke network` | Runs pinned Codex app-server `command/exec` in disposable default and critic containers plus ephemeral TCP/Unix-socket fixtures | Removes the exact temporary service/network; no model, credential, or durable application state | Requires both built images and Docker egress; loads the managed requirements with Codex 0.149.1, then verifies default denial, critic HTTPS access to allowlisted `example.com`, one reachable unlisted-public-host denial, and loopback/private/Unix-socket denial; does not exercise the other five allowlisted hosts, alternate schemes/ports/methods, DNS rebinding, or link-local/metadata routing |
 
 Administrative mutations use a host lock when `flock` is installed. Production
 hosts MUST provide `flock`; without it, the helper cannot exclude two concurrent
@@ -799,10 +852,15 @@ the inner Bubblewrap sandbox can initialize. These relaxations mean the remainin
 container controls and trusted-host boundary are material. Re-test the complete
 policy after every Docker, kernel, AppArmor, base-image, or Codex change.
 
-Agent networks permit outbound bridge egress by default. They are not an egress
-allowlist. Prompts and agent definitions remain trusted inputs in V1. Before
-accepting hostile code, add network allowlisting, a tailored AppArmor/seccomp
-profile, stronger worker isolation, and machine-enforced Compose policy.
+Agent networks permit outbound bridge egress by default. The managed Codex
+proxy keeps sandboxed command access default-off and protects local/private
+destinations for reviewed opt-ins. Its exact six-host allowlist narrows sandboxed
+command egress, but the outer container has no host-layer egress policy and the
+hostname filter does not constrain scheme, port, method, or payload. Prompts,
+repositories selected for execution, and agent definitions remain trusted
+inputs in V1. Before accepting hostile code, add a host/L7 egress policy,
+tailored AppArmor/seccomp profile, stronger worker isolation, and
+machine-enforced Compose policy.
 
 The shared Codex auth volume is writable by the Codex parent process in every
 runner. Only reviewed agent images and base contexts may run. The common-skills
@@ -848,7 +906,9 @@ scripts/remotectl doctor
 scripts/remotectl status
 scripts/remotectl backup create
 scripts/remotectl backup verify .runtime/backups/<created-archive>.tar.gz
+scripts/remotectl smoke network
 scripts/remotectl smoke live --agent joke-agent --timeout 300
+scripts/remotectl smoke live --agent repository-critic --timeout 900
 ```
 
 Before declaring the deployment production-ready, verify all of the following:
@@ -871,7 +931,13 @@ Before declaring the deployment production-ready, verify all of the following:
 - every stateful dependency has a tested independent recovery procedure;
 - a backup archive verifies successfully and is copied to protected external
   storage; and
-- the authenticated two-turn joke-agent smoke workflow passes.
+- the authenticated two-turn joke-agent smoke workflow passes; and
+- the managed-network source contract pins the exact six-host allowlist, and the
+  probe proves default denial plus critic HTTPS access to `example.com` and
+  loopback/private-service/Unix-socket policy, with its documented
+  link-local/metadata and DNS-rebinding limitations; and
+- the repository-critic smoke proves snapshot traceability, coverage artifacts,
+  exact dependency provenance, unchanged input, and default hook suppression.
 
 After any Docker, kernel, AppArmor, base-image, Codex CLI, Compose-contract, or
 agent-dependency change, repeat validation, doctor, backup verification, and the

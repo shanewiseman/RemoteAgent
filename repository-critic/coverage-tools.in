@@ -1,0 +1,3 @@
+# Offline-injected Python instrumentation only. Repository-owned pytest and
+# plugin versions must not be replaced by the critic.
+coverage==7.16.0

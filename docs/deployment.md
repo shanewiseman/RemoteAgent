@@ -11,7 +11,10 @@ settings. Production acceptance status is tracked in the
 - Docker Engine with the Compose v2 plugin and permission to use its socket.
 - Bash, `curl`, `git`, `tar`, and Python 3 for local validation/smoke tooling.
 - Outbound HTTPS from agent containers to OpenAI authentication/model services,
-  and from the router to intended public Git hosts when Git companions are used.
+  from the router to intended public Git hosts when Git companions are used,
+  and from the repository critic to `example.com`, `pypi.org`,
+  `files.pythonhosted.org`, `registry.npmjs.org`, `proxy.golang.org`, and
+  `sum.golang.org` when project dependency restoration is required.
 - Resolver access that returns all A/AAAA candidates for Git-host validation and
   supports the router's per-address Git DNS pinning.
 - Enough disk for PostgreSQL, images, conversation workspaces, and artifacts.
@@ -114,6 +117,20 @@ the DNS and outbound HTTPS required by deployment policy. An upstream egress
 proxy or firewall is still recommended defense in depth before broadening the
 trusted internal boundary.
 
+The repository critic is a distinct command-network opt-in. Its Codex sandbox
+uses the root-owned managed proxy, whose allowlist contains exactly
+`example.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`,
+`proxy.golang.org`, and `sum.golang.org`; other checked-in agents remain
+network-off. Ensure public DNS and bridge egress work from the runner, then use
+`scripts/remotectl smoke network` to execute the exact pinned Codex app-server
+policy without a model and verify default-agent denial to the otherwise admitted
+`example.com`, critic HTTPS success to that probe host, unlisted-public-host
+denial, and critic loopback/private-service/Unix-socket denial.
+DNS rebinding and reachable link-local/metadata fixtures are not exercised by
+that probe. The proxy filters hostnames but cannot restrict scheme, port, or
+HTTP method for an admitted host. If those guarantees are required, add a
+separately reviewed host or L7 egress control before enabling the critic.
+
 ## Updating
 
 The management CLI deliberately does not modify Git state:
@@ -149,6 +166,28 @@ backup. Remember that companion bytes are plaintext and accessible to every
 holder of the shared router bearer through the supported metadata/control
 surface; this release adds no per-user ACL or encryption at rest.
 
+Release 0.4.0 has no database migration and keeps `/api/v1` wire shapes. It adds
+one fail-closed structured agent-config exception and bakes a managed network
+policy into every runner image. Rebuild every agent image, verify the default
+network-off doctor probe, run `scripts/remotectl smoke network`, and run both
+live smoke agents before accepting the release. Phonebook synchronization
+creates a missing `repository-critic` but does not overwrite an existing
+durable revision.
+
+For immediate rollback, drain critic jobs and publish a new immutable critic
+revision without `network_access=true`; then disable the managed proxy in the
+image policy and rebuild every agent. For a full 0.3 downgrade, before switching
+to the 0.3 checkout use the 0.4 API to replace the durable critic definition in
+one new revision with both `enabled=false` and a `config_toml` that omits the
+entire `[sandbox_workspace_write]` table. Verify it appears disabled with
+`GET /api/v1/agents?include_disabled=true`, then drain all remaining critic
+jobs and delete critic conversations that must not remain resumable before
+checking out 0.3. Editing the phonebook or merely removing
+`network_access=true` from checked-in files is insufficient: phonebook
+synchronization does not overwrite the durable current revision, and 0.3 cannot
+validate the nested table. Retain a 0.4 compatibility build instead when critic
+conversations must remain resumable.
+
 The conversation model-profile schema change remains additive. Its migration adds
 nullable `model` and `reasoning_effort` snapshots to conversations and jobs and
 leaves pre-upgrade rows `null`, preserving their dynamic agent-config/Codex
@@ -164,7 +203,9 @@ and response lease/acknowledgement before removing the backup.
 
 ## Version pinning
 
-The runtime Dockerfiles pin Python, Node, Docker CLI/Compose, and Codex CLI
-versions. Update those pins through normal review, rebuild all agent images, and
-run deterministic tests before deployment. Avoid runtime package installation;
-agent containers must be ready when instantiated.
+The runtime Dockerfiles pin Python, Node, Docker CLI/Compose, Codex CLI, and
+critic coverage executors. Update those pins through normal review, rebuild all
+agent images, and run deterministic tests before deployment. Agent executables
+must be ready when instantiated. The critic's narrower exception installs only
+target-project dependencies into disposable workspace scratch and records the
+resolved set; it never mutates the image.

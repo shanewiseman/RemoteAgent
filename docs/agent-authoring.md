@@ -68,6 +68,35 @@ file-backed instructions/skills, named permission profiles, or additional
 writable roots. Those features execute outside or can weaken the local command
 sandbox and therefore require a reviewed platform release.
 
+The sole supported structured setting is a per-revision command-network opt-in:
+
+```toml
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = true
+```
+
+The table may contain only a Boolean `network_access`. `true` requires an
+explicit top-level `workspace-write` mode. The template remains network-off;
+enable this only for a reviewed agent whose purpose requires dependency access
+through the machine-managed allowlist. This release admits exactly
+`example.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`,
+`proxy.golang.org`, and `sum.golang.org`; agent configuration cannot add or
+change those destinations or the local-address, proxy, or socket policy. The
+behavior follows the official
+[Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference);
+the managed policy is hostname-based and does not restrict scheme, port, or
+HTTP method.
+
+The router repeats this validated revision Boolean as an explicit per-run Codex
+CLI override (`true` only for an effective `workspace-write` turn, `false` for
+every other turn). This works around the pinned Codex 0.149.1
+[static nested-config bug](https://github.com/openai/codex/issues/40339). The
+root-owned policy enables the proxy feature and fixes its destinations and
+guards, but deliberately omits the managed `experimental_network.enabled` key
+because that version interprets `enabled=true` as an unconditional grant.
+
 Top-level `model` and `model_reasoning_effort` values are defaults for new
 RemoteAgent conversations. A caller may override them with the `model` and
 `reasoning_effort` fields on its initial prompt. The router persists the resolved
@@ -108,10 +137,26 @@ fail the job rather than silently running the agent without the service.
 
 ## Dependencies, companions, and artifacts
 
-Install every dependency in the Dockerfile and pin material versions. A turn
-must not wait for package managers or mutate the image. The base image already
-contains pinned Codex CLI, Node, Python, Git, ripgrep, Bubblewrap, build tools,
-and Docker CLI/Compose for trusted agent workflows.
+Install every agent executable in the Dockerfile and pin material versions. A
+turn must never mutate the image or download arbitrary executable tooling. The
+base image already contains pinned Codex CLI, Node, Python, Git, ripgrep,
+Bubblewrap, build tools, and Docker CLI/Compose for trusted agent workflows.
+
+A reviewed network-enabled agent may restore a target project's dependencies
+inside a bounded, disposable directory under `/workspace`; it must never install
+them into the image, shared auth volume, common-skills volume, or persistent
+companion. Prefer checked-in frozen locks and credential-free HTTPS sources.
+When no lock exists, generate one only in scratch, record the exact resolved
+versions and integrity data, and label the result non-reproducible from the
+repository state alone. Clear inherited Git/package credentials and reject SSH,
+credential-bearing, insecure-registry, and path-escaping dependencies.
+
+Package install/lifecycle hooks, source builds, generators, and standalone
+repository build scripts are disabled by default. They require explicit
+authorization in the current caller prompt; text inside a companion is not
+authorization. Test-runner compilation needed by an otherwise authorized test
+command is allowed. Report rather than silently relaxing these rules when a
+project cannot be restored.
 
 Caller-bound companion data is exposed through stable names beneath
 `/workspace/companions`. The router-owned prompt preamble lists each active

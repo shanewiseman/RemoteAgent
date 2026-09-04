@@ -13,7 +13,7 @@ from fastapi.openapi.utils import get_openapi
 from .api import build_api_router
 from .mcp_server import build_mcp
 
-API_VERSION = "0.3.0"
+API_VERSION = "0.4.0"
 MCP_PROTOCOL_BASELINE = "2025-06-18"
 
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "options", "head"})

@@ -83,7 +83,7 @@ class WorkspaceManager:
         os.chmod(context_path, 0o600)
         config = definition.config_toml.rstrip()
         if "cli_auth_credentials_store" not in tomllib.loads(config or ""):
-            config = f'{config}\ncli_auth_credentials_store = "file"'.lstrip()
+            config = f'cli_auth_credentials_store = "file"\n{config}'.rstrip()
         config_path = paths.control / "config.toml"
         config_path.write_text(config + "\n", encoding="utf-8")
         os.chmod(config_path, 0o600)

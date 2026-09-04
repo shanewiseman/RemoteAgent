@@ -84,13 +84,61 @@ The runner image bakes a root-owned, mode-0444
 agent config revision: command tools cannot read `$CODEX_HOME/*auth*`, full
 filesystem access is rejected, approval is fixed to `never`, and only
 `read-only`/`workspace-write` modes are accepted. It also disables config-
-defined MCP servers, user hooks, plugins/apps, code-mode host execution, and
-browser/computer integrations because those processes do not share the local
-command sandbox. The ChatGPT backend URL is pinned. Router and host validation
-reject custom model providers/base URLs, notification commands, arbitrary
-path-bearing instruction/skill fields, named permission profiles, and extra
-writable roots. Changing those controls requires a reviewed image/router
+defined MCP servers, user hooks, plugins/apps, and browser/computer integrations
+because those processes do not share the local command sandbox. The bundled
+local code-mode host is enabled as a narrow exception: Codex 0.149.1 model
+metadata can select code-mode tools even while the optional `code_mode` feature
+is false, and disabling the host makes those selected tools fail closed. The
+host evaluates orchestration JavaScript in sandbox-enabled V8 with imports and
+Node APIs unavailable; every nested OS tool call returns to Codex and retains
+the same managed approval, filesystem, and network enforcement. No remote
+code-mode endpoint is configured. The ChatGPT backend URL is pinned. Router and
+host validation reject custom model providers/base URLs, notification commands,
+arbitrary path-bearing instruction/skill fields, named permission profiles, and
+extra writable roots. Changing those controls requires a reviewed image/router
 release, not an agent revision.
+
+The managed image also contains a command-network proxy policy, but networking
+remains off unless an immutable agent revision explicitly combines
+`sandbox_mode="workspace-write"` with
+`[sandbox_workspace_write].network_access=true`. The policy accepts public
+network access only to the exact hostnames `example.com`, `pypi.org`,
+`files.pythonhosted.org`, `registry.npmjs.org`, `proxy.golang.org`, and
+`sum.golang.org`, while denying local binding, upstream-proxy escape,
+non-loopback proxy exposure, and arbitrary Unix sockets. The repository critic
+is the only checked-in opt-in; the template and joke agent remain offline.
+
+For Codex 0.149.1, the root requirements enable the `network_proxy` feature and
+provide constraints but intentionally omit `experimental_network.enabled`:
+managed `enabled=true` would grant the allowlist regardless of the agent
+revision, while `enabled=false` would deny even an opted-in critic. The router
+therefore repeats the validated immutable revision Boolean on every `codex exec`
+invocation, forcing `false` unless both the revision and effective sandbox are
+`workspace-write` with networking enabled. Proxy runtime state uses
+`XDG_RUNTIME_DIR=/tmp/remoteagent-codex-runtime`, created mode 0700 inside the
+existing per-container `/tmp` tmpfs; no new mount is introduced.
+
+This is a hostname policy, not an HTTPS-only firewall. Codex 0.149.1 does not
+let the deployment restrict scheme, port, HTTP method/body, calling process,
+lockfile state, lifecycle scripts, or transfer size through this table. The
+critic configures package managers for credential-free HTTPS and validates
+declared dependency locations, but those are agent-enforced behaviors. A public
+HTTP endpoint or alternate port on an admitted hostname may still be reachable,
+and the allowlist cannot prevent source exfiltration through an admitted
+service. Strict protocol enforcement requires a separate host or L7 egress
+control that this release does not add. See the
+[Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+and [internet-access risk guidance](https://learn.chatgpt.com/docs/cloud/internet-access).
+
+The external bearer already authorizes registering/revising trusted agent
+definitions, so the safe config shape is not hard-coded to one agent ID. A
+bearer holder can create another network-enabled revision. Review configuration
+changes and treat a repository submitted to the critic as trusted executable
+code for that sandboxed turn. Repository text is nevertheless evidence, never
+authorization to change critic policy. Dependency restoration occurs only in a
+bounded disposable copy; image-baked tools, lock preference, credential
+clearing, hook suppression, provenance, and cleanup reduce accidental exposure
+but do not form a hostile-code security boundary.
 
 Any bearer holder may choose a statically valid model and reasoning effort when
 starting a conversation, which can change latency and shared subscription/API
@@ -100,9 +148,18 @@ authenticated model catalog or preflight account/model compatibility; an
 unavailable selection fails through the normal asynchronous job path without
 exposing credential or catalog contents.
 
-`scripts/remotectl doctor` runs a no-network dummy-credential probe through the
+`scripts/remotectl doctor` runs a network-off dummy-credential probe through the
 same nested sandbox and fails if the managed file becomes readable or the
 workspace becomes unwritable. It never mounts or prints the real credential.
+`scripts/remotectl smoke network` uses pinned app-server `command/exec` to
+separately verify default-agent denial to
+the otherwise allowlisted `example.com`, the critic's positive HTTPS result for
+that probe host, denial to a reachable unlisted public host, and negative
+loopback/private-service/Unix-socket behavior without invoking a model. The
+source contract test pins all six admitted hostnames. The probe does not
+exercise plain HTTP or alternate ports/methods on an admitted host,
+link-local/metadata routing, DNS rebinding, upstream-proxy bypass, or every
+possible socket path, and must not be read as evidence for those untested cases.
 
 These controls materially narrow local file access, but the Compose settings
 relax two outer-kernel filters so the inner sandbox can exist, and Codex still

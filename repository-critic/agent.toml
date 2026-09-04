@@ -1,0 +1,26 @@
+schema_version = 1
+id = "repository-critic"
+name = "Repository Critic"
+description = "Reviews a complete repository snapshot against its own documentation, executes existing tests and coverage, and reports risk-prioritized quality and architecture gaps."
+compose_file = "compose.yaml"
+project_name = "remoteagent-repository-critic"
+runner_service = "agent"
+dependency_services = []
+enabled = true
+config_file = "config.toml"
+base_context_file = "AGENTS.md"
+
+[environment]
+REMOTEAGENT_AGENT_ID = "repository-critic"
+REMOTEAGENT_REVIEW_MODE = "repository_snapshot"
+
+[labels]
+"io.remoteagent.builtin" = "true"
+"io.remoteagent.quality" = "true"
+
+[metadata]
+category = "quality"
+review_mode = "repository_snapshot"
+output_contract = "A repository-review Markdown report, structured review and coverage JSON, a run manifest, bounded logs, and archived native coverage evidence."
+supports_artifacts = true
+toolchain_revision = "2026-09-02"

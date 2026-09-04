@@ -5,10 +5,10 @@
 | Field | Value |
 |---|---|
 | Document ID | RA-PRD-001 |
-| Version | 1.3.0 |
+| Version | 1.4.0 |
 | Status | Current implementation baseline |
 | Baseline date | 2026-09-02 |
-| Product release | RemoteAgent 0.3.0 / local image baseline |
+| Product release | RemoteAgent 0.4.0 / local image baseline |
 | Intended deployment | Dedicated Linux Docker host on a trusted internal network |
 | Owner | RemoteAgent maintainers |
 | Approver | To be assigned |
@@ -40,6 +40,7 @@ requirements change. It must not be resolved by silently changing only one sourc
 
 | Version | Date | Change |
 |---|---|---|
+| 1.4.0 | 2026-09-02 | Added the repository-snapshot critic, risk-focused polyglot coverage artifacts, and a revisioned, managed command-network exception for controlled dependency restoration. |
 | 1.3.0 | 2026-09-02 | Added staged uploads/public Git imports, persistent sequence-bounded conversation companions, safe archive/Git acquisition, companion API/MCP metadata, and bounded observability. |
 | 1.2.0 | 2026-09-02 | Added the sibling cron service, seven MCP schedule/response tools, scoped service authentication, durable cron persistence/recovery, and cron-aware operations. |
 | 1.1.0 | 2026-09-02 | Added the conversation-level model/reasoning execution profile, additive client fields, persistence migration, dashboard visibility, and explicit catalog-validation gap. |
@@ -325,7 +326,7 @@ Each acceptance statement describes the evidence needed to change a status to
 | RA-AGT-004 | P0 | Met | Every effective structural, configuration, or base-context change MUST create a complete immutable, checksummed revision; a queued job MUST retain its submitted revision. | Historic revisions reconstruct the complete executable definition and a queued job still resolves its original revision after replacement. | T: `test_full_agent_definition_is_immutable_per_revision`, `test_agent_snapshot_migration_backfills_live_v1_database`; I: migration `20260902_0002`. |
 | RA-AGT-005 | P0 | Met | Concurrent partial configuration and base-context updates MUST serialize without losing either change. | Two concurrent partial updates produce ordered revisions and a current definition containing both values. | T: `test_concurrent_partial_agent_updates_are_serialized_and_merged`. |
 | RA-AGT-006 | P0 | Met | The checked-in phonebook MUST seed missing agents only and MUST NOT overwrite durable runtime revisions on restart. Invalid entries SHOULD be isolated from valid entries. | A runtime override survives synchronization; valid agents load when a peer manifest is malformed. | T: phonebook seed and project-boundary tests; I: `load_phonebook_partial`. |
-| RA-AGT-007 | P0 | Met | Agent-controlled Codex TOML MUST use a fail-closed scalar allowlist, file credential storage, `approval_policy="never"`, and only `read-only` or `workspace-write` sandbox modes. | Providers, backend URLs, MCP servers, hooks, notifications, plugins/apps, profiles, file readers, extra writable roots, structured values, and danger-full-access are rejected. | T: config escape and danger-full-access parameterized tests; I: `SAFE_CODEX_CONFIG_KEYS`. |
+| RA-AGT-007 | P0 | Met | Agent-controlled Codex TOML MUST use a fail-closed allowlist, file credential storage, `approval_policy="never"`, and only `read-only` or `workspace-write` sandbox modes. The sole structured exception is `[sandbox_workspace_write].network_access: bool`; `true` requires explicit workspace-write mode. | Providers, backend URLs, MCP servers, hooks, notifications, plugins/apps, profiles, file readers, extra writable roots, every other structured value, and danger-full-access are rejected identically by the API and deployment validator. | T: config escape, exact network-table, validator-parity, and danger-full-access tests; I: `SAFE_CODEX_CONFIG_KEYS`, `remotectl validate`. |
 | RA-AGT-008 | P0 | Met | Definitions MUST validate agent/project/service identifiers, duplicate or overlapping services, environment ownership, field types, and configured length limits. | Invalid slugs, reserved or `DOCKER_*` environment keys, duplicate dependencies, runner/dependency overlap, prompts over 2,000,000 characters, and contexts over 1,000,000 characters fail validation. | T: environment and request validation tests; I: `schemas.py`, `environment.py`, `remotectl validate`. |
 | RA-AGT-009 | P0 | Partial | The resolved Compose model MUST contain the runner and every declared dependency, and every dependency MUST have a finite enabled health check. | Validation checks the runner and all dependency services plus non-disabled test, interval, timeout, retries, and finite start period. | T: `test_dependency_services_require_compose_healthchecks`; gap: current code verifies test presence only, not all timing fields or semantic health. |
 | RA-AGT-010 | P0 | Partial | Every registered runner MUST comply with the runtime isolation, mount, label, networking, and resource contract in [Docker runtime and Compose contract](docker-runtime.md). | Registration rejects root execution, writable rootfs, missing capability drop or no-new-privileges, missing limits, Docker socket/unsafe writable mounts, undeclared host ports, and `container_name`. | I: templates comply; gap: `ComposeProjectValidator` does not enforce these controls. Runtime registration therefore remains restricted to reviewed definitions. |
@@ -399,7 +400,7 @@ summarize its product-level obligations.
 
 | ID | Pri | Status | Requirement | Acceptance | Verification and evidence |
 |---|---:|---|---|---|---|
-| RA-DKR-001 | P0 | Met | The Codex base and each agent image MUST be built before runtime with required dependencies installed and material versions reviewed. A normal turn MUST NOT install packages. | A newly created runner can execute immediately without package-manager or image mutation steps. | I: `runtime/agent.Dockerfile`, agent Dockerfiles, templates. |
+| RA-DKR-001 | P0 | Met | The Codex base and each agent image MUST be built before runtime with required agent executables installed and material versions reviewed. A turn MUST NOT mutate the image or download arbitrary executable tooling. | A newly created runner can execute immediately; the repository critic obtains coverage executors from its pinned image and installs only target-project dependencies into isolated scratch under RA-DKR-010. | T/I: image contract tests, `runtime/agent.Dockerfile`, agent Dockerfiles, templates. |
 | RA-DKR-002 | P0 | Met | One job MUST run through the exact registered Compose file, project, and runner service as an ephemeral `run --rm --no-deps` container with deterministic labels and name. | Command construction uses the immutable job revision; the worker is removed after success, failure, cancellation, or recovery. | I: `DockerComposeRuntime.run`, `_remove_worker_container`. |
 | RA-DKR-003 | P0 | Met | The runner MUST receive only its isolated workspace/sessions/artifacts/control paths plus the shared auth and read-only common-skills volumes. It MUST NOT receive the Docker socket. | The reference template and joke agent resolve those mounts, and the router injects no controller secret into the runner environment. | I: template and joke Compose, `environment.py`, `runtime.py`. |
 | RA-DKR-004 | P0 | Met | The router MUST start every manifest-listed dependency with Compose, wait for health, fail the job on startup failure, and stop idle dependencies after a bounded warm period. | `compose up -d --wait --wait-timeout` precedes the runner; release schedules a warm stop; router shutdown stops dependencies known to that process. | I: `provision`, `release`, `close` in `runtime.py`. Crash reconciliation of orphan warm sidecars remains a gap. |
@@ -408,6 +409,7 @@ summarize its product-level obligations.
 | RA-DKR-007 | P1 | Partial | Core router, PostgreSQL, and Redis containers SHOULD have explicit resource and privilege bounds appropriate to the host. | CPU, memory, and PID budgets are configured and load-tested; capability policy is reviewed; healthchecks and log rotation remain in place. | I: healthchecks, read-only roots, tmpfs, no-new-privileges, and log rotation exist; consistent resource/capability limits do not. |
 | RA-DKR-008 | P0 | Partial | The deployment MUST support file-backed ChatGPT subscription authentication. An API-key mode MAY reuse the same router contract after separate qualification. | Headless ChatGPT login and a live two-turn smoke pass. API mode requires its own credential, model traffic, telemetry, and failure tests before its status becomes Met. | D/I: ChatGPT auth helper and live smoke exist; API-key helper/auth mode exists but has not been qualified end to end. |
 | RA-DKR-009 | P0 | Met | Cron MUST run as a separate non-root backend-only container with read-only root, dropped capabilities, bounded tmpfs/CPU/memory/PIDs, and no Docker socket, Redis, repository/state, edge network, or Codex-auth access. | The resolved root Compose model contains the limits, no published cron port, only approved secret mounts, and a one-way dependency on healthy router. | T/I: Compose hardening tests, `compose.yaml`, `runtime/cron.Dockerfile`. |
+| RA-DKR-010 | P0 | Partial | A reviewed agent MAY opt into managed command networking solely through its immutable `[sandbox_workspace_write].network_access=true` revision. The router MUST force the effective Boolean on every Codex invocation and MUST force `false` when the global sandbox is read-only. Runtime project dependency restoration MUST stay in bounded disposable workspace scratch, prefer checked-in locks, suppress install/build/generate hooks unless the current caller explicitly authorizes them, and publish exact provenance. | Default agents remain offline; the critic can restore credential-free dependencies only through the exact managed `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`, `proxy.golang.org`, and `sum.golang.org` registry/proxy hosts (plus `example.com` for the release probe) without modifying the companion or image; unlocked resolution is labeled non-reproducible; local/private destinations, upstream proxies, and Unix sockets remain denied by managed policy. | T/I: config-policy, explicit true/false CLI override, scratch-runner, hook, provenance, and critic smoke tests; source contract pins all six hosts; non-model app-server `command/exec` probe proves default denial, critic HTTPS access to `example.com`, reachable unlisted-public-host denial, and loopback/private/Unix-socket denial. Missing: deterministic reachable link-local/metadata and DNS-rebinding fixtures plus an upstream-proxy bypass probe. |
 
 ### Artifact requirements
 
@@ -491,9 +493,9 @@ change-control process:
 | RA-SEC-001 | P0 | Met | Initialization MUST generate independent high-entropy router, database, scoped cron-MCP, and cron-API secrets, restrict host file modes, and support explicit target-aware token rotation. | Secret files are non-empty and inaccessible to group/other; external rotation invalidates callers and internal rotation recreates router/cron with synchronized credentials. | I/T: `remotectl init/doctor/token`, settings/auth tests, Compose secrets. |
 | RA-SEC-002 | P0 | Constraint | Plain HTTP SHALL be used only on an access-restricted trusted internal network. Any untrusted hop MUST use a correctly configured TLS reverse proxy and secure dashboard cookies. | Firewall scope is reviewed; after TLS, router binding and forwarded headers are constrained and `dashboard_allow_http=false`. | I: deployment/security docs and dashboard secure-transport enforcement. |
 | RA-SEC-003 | P0 | Met | Child Compose processes MUST receive only allowlisted host values plus validated agent environment. Subscription mode MUST not inherit unrelated API credentials or controller secrets. | Reserved names and all `DOCKER_*` overrides are rejected; bearer, database URL/password, and host API keys do not enter runner environment. | T: environment override test; I: `environment.py`, runtime environment construction. |
-| RA-SEC-004 | P0 | Met | The runner image MUST contain a root-owned mode-0444 managed Codex policy that pins approval/sandbox/auth/backend controls, denies sandboxed auth reads, and disables integrations outside the local command sandbox. | A no-network dummy credential probe proves policy immutability, credential denial, and workspace writing after every Codex/Docker/kernel policy change. | D/T/I: `remotectl doctor`, `runtime/codex-requirements.toml`, config escape tests. |
+| RA-SEC-004 | P0 | Partial | The runner image MUST contain a root-owned mode-0444 managed Codex policy that pins approval/sandbox/auth/backend controls, denies sandboxed auth reads, disables unneeded integrations outside the local command sandbox, and keeps command networking default-off with an exact managed six-host allowlist plus a private-network guard for reviewed opt-ins. The policy MUST enable the pinned local `codex-code-mode-host` while leaving the optional `code_mode` experiment disabled, because Codex 0.149.1 model metadata can independently select code-mode tools; no remote code-mode endpoint is permitted, and nested OS tools MUST retain normal managed sandbox enforcement. For pinned Codex 0.149.1, the policy MUST enable the proxy feature without setting the unconditional `experimental_network.enabled` requirement, and the router MUST pass an explicit effective per-run network Boolean. | The dummy-credential doctor probe proves default network denial, policy immutability, credential denial, workspace writing, and availability of the effective local code-mode feature plus its executable; the source contract pins every admitted host; the dedicated app-server probe proves default denial, HTTPS access to allowlisted `example.com` only for the critic, denial of an unlisted public host, and loopback/private-service/Unix-socket denial. Proxy runtime state remains mode 0700 beneath the existing `/tmp` tmpfs. | D/T/I: `remotectl doctor`, managed requirements contract, config escape/CLI-materialization tests, and `remotectl smoke network`. Missing: deterministic reachable link-local/metadata, DNS-rebinding, and upstream-proxy bypass probes; hostname policy does not constrain scheme, port, method, or payload for admitted hosts. |
 | RA-SEC-005 | P0 | Constraint | Docker socket access and arbitrary agent images SHALL be treated as privileged, trusted-code boundaries. The bearer is not a host security boundary against a reviewed agent author. | Router runs only on a dedicated host; agent registration is operator-reviewed; threat documentation states that a custom image could bypass Codex and read shared auth. | I: router socket mount, shared auth mount, `security.md`. A future socket proxy/isolated worker is not implemented. |
-| RA-SEC-006 | P1 | Gap | A broadened production deployment SHOULD enforce outbound network policy, service-wide rate/body limits, stronger secret management, and artifact/companion security controls. | Approved allowlists and limits are enforced and tested at proxy/application/runtime layers; secrets can be externally managed; suspicious content has defined handling. | I: Git URL/address/process controls exist, but there is no host egress allowlist, global API/MCP rate limit, early global body limiter, external secret manager, or malware scan. |
+| RA-SEC-006 | P1 | Gap | A broadened production deployment SHOULD enforce outbound network policy, service-wide rate/body limits, stronger secret management, and artifact/companion security controls. | Approved allowlists and limits are enforced and tested at proxy/application/runtime layers; secrets can be externally managed; suspicious content has defined handling. | I: Git URL/address/process controls and the critic's six-host Codex-sandbox allowlist exist, but there is no host-layer egress allowlist, global API/MCP rate limit, early global body limiter, external secret manager, or malware scan. |
 | RA-SEC-007 | P1 | Partial | Stored prompts, responses, contexts, companions, and artifacts MUST have an explicit data classification, access, and retention policy. Raw model reasoning and credential-bearing stderr MUST NOT be persisted or displayed. | Policy identifies permitted content and incident deletion/export procedures; tests prove reasoning/secret redaction. | T: dashboard redaction tests; I: runtime stores stderr byte count only and security docs state companions are plaintext/in backups. Gap: all content is accessible to any shared-bearer holder and no PII classification policy exists. |
 | RA-SEC-008 | P1 | Gap | Release artifacts SHOULD have reproducible dependency locking, digest pinning, SBOMs, vulnerability scanning, and provenance/signature verification. | CI fails on unapproved drift/severity and publishes signed image/SBOM attestations. | I: some runtime versions are pinned, but base images use tags, Python uses ranges, APT is unpinned, and no SBOM/sign/scan pipeline exists. |
 
@@ -516,7 +518,7 @@ change-control process:
 | ID | Pri | Status | Requirement | Acceptance | Verification and evidence |
 |---|---:|---|---|---|---|
 | RA-OPS-001 | P0 | Met | The repository MUST provide supported helpers for initialization, validation, router/cron/runner builds, auth/token/skills, lifecycle, logs, both migration chains, agents, smoke tests, backup/restore, cleanup, diagnostics, and upgrade. Destructive actions MUST require explicit confirmation. | `scripts/remotectl help` exposes each flow; `down` preserves volumes; cleanup is dry-run by default and scoped to deployment labels; no unscoped system prune is used. | I: `scripts/remotectl`, `Makefile`. |
-| RA-OPS-002 | P0 | Met | A read-only doctor command MUST check host/runtime prerequisites, all secrets, Compose, images, managed sandbox behavior, auth, agent definitions/images, router health, authenticated cron database/schema/MCP readiness, and minimum free state disk. Credential mutation MUST refuse an active router. | A healthy deployment passes all checks; missing auth is explicit; the sandbox probe uses dummy credentials and no network. | D/I: `remotectl doctor`, auth mutation guards. |
+| RA-OPS-002 | P0 | Met | A read-only doctor command MUST check host/runtime prerequisites, all secrets, Compose, images, the managed local code-mode feature and executable, managed sandbox behavior, auth, agent definitions/images, router health, authenticated cron database/schema/MCP readiness, and minimum free state disk. Credential mutation MUST refuse an active router. | A healthy deployment passes all checks; missing auth is explicit; the code-mode and sandbox probes use no network or model capacity, and the sandbox probe uses dummy credentials. | D/I: `remotectl doctor`, auth mutation guards. |
 | RA-OPS-003 | P0 | Met | Upgrade MUST refuse a dirty checkout, validate, drain and stop intake, create a consistent backup, rebuild/recreate, and attempt to restart the prior router on failure. | An operator can retain the old checkout/images/backup and complete health, discovery, and smoke verification before accepting the release. | I: `remotectl upgrade apply`; no automatic database downgrade is promised. |
 | RA-OPS-004 | P1 | Gap | Releases SHOULD be governed by CI and staging gates covering unit, contract, database, Redis, Docker, security, backup/restore, upgrade, and smoke behavior. | A protected pipeline publishes immutable versioned artifacts only after all gates and records rollback evidence. | I: no CI configuration, automated Compose integration, restore drill, image scan, or signed release process exists. |
 
@@ -528,6 +530,7 @@ change-control process:
 | RA-TST-002 | P0 | Met | Operators MUST have an opt-in live smoke test against authenticated Codex; it MUST refuse CI by default. | The smoke performs discovery, one new turn, one continuation, unique marker and shape checks, and preserves identifiers on failure. | D/I: `scripts/smoke_joke_agent.py`, `remotectl smoke live`. |
 | RA-TST-003 | P1 | Partial | Automated acceptance SHOULD cover the production database/cache/runtime rather than relying predominantly on SQLite and fakes. | CI exercises real PostgreSQL advisory locks/contention, Redis failure/sessions, Docker isolation and sidecars, cancellation/timeouts, retention, artifact ranges, backup/restore, and API mode where supported. | T/I: the current unit suite covers core invariants, model profiles, and dashboard safety; the listed integration coverage is absent. |
 | RA-TST-004 | P0 | Met | Companion tests MUST cover upload/archive/Git policy, quotas and concurrent admission, single-use/idempotent binding, sequence isolation and replacement, restart/retention/backup behavior, activation repair/failure, raw/effective prompts, REST/MCP parity, scoped cron rejection, dashboard escaping, telemetry labels, and migration contracts. | Deterministic local fixtures and injected faults exercise every class without contacting arbitrary external repositories or running uploaded code. | T/I: companion service, scheduler, API/MCP, security, telemetry, and migration tests. |
+| RA-TST-005 | P0 | Met | The repository critic MUST review a complete companion snapshot against its own documentation, run existing tests, emit bounded machine-readable coverage/provenance artifacts, and prioritize uncovered high-risk behavior without inventing a universal percentage threshold. | Deterministic Python/JavaScript/Go harness tests plus an opt-in live companion smoke prove snapshot framing, documentation traceability, partial/failure states, hook suppression, unchanged input, and artifact shape. | T/I: critic contract/harness tests, `repository-critic/`, critic live smoke. |
 
 ## Current defaults and limits
 
@@ -551,6 +554,8 @@ updates, and proportionate tests.
 | Subscription lease TTL | 21,600 seconds (6 hours) | Renewed at most every 60 seconds or one-third TTL. |
 | Lease retry | 1 second | No fairness guarantee. |
 | Codex run timeout | 14,400 seconds (4 hours) | Covers `runtime.run` only, not queue/lease/dependency wait. |
+| Critic dynamic-work budget | 45 minutes | At most six project roots; restore 10 minutes and test suite 20 minutes apiece. |
+| Critic scratch budget | 2 GiB | Process-group watchdog terminates work that exceeds the disposable workspace limit. |
 | Dependency Compose wait | 120 seconds | `compose up --wait-timeout`. |
 | Dependency warm retention | 900 seconds (15 minutes) | Zero disables warming. |
 | Compose stop timeout | 30 seconds | Dependency stop. |
@@ -643,9 +648,10 @@ updates, and proportionate tests.
 
 | Component | Current reference |
 |---|---|
-| RemoteAgent router package/API | 0.3.0 |
+| RemoteAgent router package/API | 0.4.0 |
 | RemoteAgent cron package/internal API | 0.2.0; behaviorally unchanged by companion support |
-| Python runtime | 3.12.11 |
+| Router/cron Python runtime | 3.12.11 |
+| Repository critic Python runtime | 3.12.14 |
 | Node runtime | 22.19.0 |
 | Codex CLI | 0.149.1 |
 | Docker CLI/Compose source image | 29.7.2 CLI |
@@ -717,7 +723,7 @@ An operator MAY call this baseline an internal production deployment only when:
 | RA-GEN, RA-AGT | `router/src/remoteagent/agents.py`, `phonebook.py`, `schemas.py`, `compose.py`, `environment.py`, `phonebook.toml` |
 | RA-JOB, RA-CON | `jobs.py`, `scheduler.py`, `lease.py`, `runtime.py`, `workspace.py`, `conversation_lock.py` |
 | RA-CMP | `companions.py`, `jobs.py`, `scheduler.py`, `workspace.py`, companion models/migration, REST/MCP companion surfaces |
-| RA-DKR | Root and agent `compose.yaml`, `runtime/*.Dockerfile`, runtime entrypoints, `templates/agent/`, `joke-agent/` |
+| RA-DKR | Root and agent `compose.yaml`, `runtime/*.Dockerfile`, runtime entrypoints, `templates/agent/`, `joke-agent/`, `repository-critic/` |
 | RA-CRN | `cron/`, cron migrations/OpenAPI, router cron MCP/client integration, root `compose.yaml` |
 | RA-ART | `artifacts.py`, core artifact routes/resources, dashboard artifact handlers |
 | RA-API | `api.py`, `mcp_server.py`, `security.py`, `app.py`, `docs/api/*` |
@@ -725,7 +731,7 @@ An operator MAY call this baseline an internal production deployment only when:
 | RA-SEC | `security.py`, `environment.py`, `schemas.py`, `runtime/codex-requirements.toml`, Compose security settings, `scripts/remotectl` |
 | RA-DSH, RA-OBS | `dashboard/`, `telemetry.py`, `cache.py` |
 | RA-OPS | `scripts/remotectl`, `Makefile`, deployment/operations/security documents |
-| RA-TST | `router/tests/`, `scripts/smoke_joke_agent.py`, `joke-agent/` |
+| RA-TST | `router/tests/`, live smoke scripts, `joke-agent/`, `repository-critic/` |
 
 ### Automated evidence
 
@@ -818,8 +824,9 @@ Every focused change MUST identify:
 
 - Changes to Codex CLI, Node, Python, Docker, the host kernel, AppArmor, seccomp,
   Bubblewrap, mounts, UID/GID, or managed requirements MUST rebuild every agent
-  image and pass the no-network doctor probe plus deterministic and staging live
-  smoke acceptance.
+  image and pass the default-off doctor probe plus deterministic and staging live
+  smoke acceptance, including positive and private/local-negative probes for any
+  network-enabled agent.
 - Expanding agent configuration keys, writable paths, integrations, environment,
   network access, or Docker permissions is a security-boundary change requiring
   threat review.

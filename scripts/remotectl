@@ -59,6 +59,7 @@ Agents and smoke tests:
   agent build ID|--all [build flags]
   agent register ID [--replace]
   smoke live [--agent ID] [--timeout SECONDS] [--keep]
+  smoke network
 
 Maintenance:
   backup create [--output PATH]
@@ -451,6 +452,8 @@ path = pathlib.Path(sys.argv[1])
 repository = pathlib.Path(sys.argv[2]).resolve()
 with path.open("rb") as handle:
     document = tomllib.load(handle)
+if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
+    raise SystemExit(f"{path}: requires integer schema_version = 1")
 entries = document.get("agents")
 if not isinstance(entries, list):
     raise SystemExit(f"{path}: agents must be an array of tables")
@@ -486,8 +489,13 @@ for entry in entries:
     if not manifest_path.is_file():
         raise SystemExit(f"{path}: missing manifest {manifest_path}")
     with manifest_path.open("rb") as handle:
-        values = tomllib.load(handle)
-    values = values.get("agent", values)
+        manifest_document = tomllib.load(handle)
+    if (
+        type(manifest_document.get("schema_version")) is not int
+        or manifest_document["schema_version"] != 1
+    ):
+        raise SystemExit(f"{manifest_path}: requires integer schema_version = 1")
+    values = manifest_document.get("agent", manifest_document)
     if not isinstance(values, dict) or values.get("id") != agent_id:
         raise SystemExit(f"{path}: {agent_id!r} does not match its manifest")
 PY
@@ -516,6 +524,8 @@ expected_id = sys.argv[2]
 agent_root = path.parent.resolve()
 with path.open("rb") as handle:
     manifest = tomllib.load(handle)
+if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
+    raise SystemExit(f"{path}: requires integer schema_version = 1")
 required = {"id", "name", "description", "compose_file", "runner_service", "enabled"}
 missing = sorted(required - manifest.keys())
 if missing:
@@ -649,6 +659,7 @@ if config_file:
         "plan_mode_reasoning_effort",
         "review_model",
         "sandbox_mode",
+        "sandbox_workspace_write",
         "service_tier",
         "show_raw_agent_reasoning",
         "tool_output_token_limit",
@@ -662,13 +673,39 @@ if config_file:
             + ", ".join(unsupported)
         )
     structured = sorted(
-        key for key, value in config.items() if isinstance(value, (dict, list))
+        key
+        for key, value in config.items()
+        if key != "sandbox_workspace_write" and isinstance(value, (dict, list))
     )
     if structured:
         raise SystemExit(
             f"{config_path}: structured Codex config keys are not allowed: "
             + ", ".join(structured)
         )
+    workspace_write = config.get("sandbox_workspace_write")
+    if workspace_write is not None:
+        if not isinstance(workspace_write, dict):
+            raise SystemExit(f"{config_path}: sandbox_workspace_write must be a table")
+        unsafe_workspace_write = set(workspace_write) - {"network_access"}
+        if unsafe_workspace_write:
+            raise SystemExit(
+                f"{config_path}: unsupported or unsafe sandbox_workspace_write keys: "
+                + ", ".join(sorted(unsafe_workspace_write))
+            )
+        if set(workspace_write) != {"network_access"}:
+            raise SystemExit(
+                f"{config_path}: sandbox_workspace_write must contain only network_access"
+            )
+        network_access = workspace_write["network_access"]
+        if type(network_access) is not bool:
+            raise SystemExit(
+                f"{config_path}: sandbox_workspace_write.network_access must be a boolean"
+            )
+        if network_access and config.get("sandbox_mode") != "workspace-write":
+            raise SystemExit(
+                f"{config_path}: sandbox_workspace_write.network_access requires "
+                "sandbox_mode = 'workspace-write'"
+            )
 
 context_file = manifest.get("base_context_file")
 if context_file:
@@ -1629,6 +1666,31 @@ doctor_command() {
             --user "${sandbox_uid}:${sandbox_gid}" \
             --cap-drop ALL \
             --security-opt no-new-privileges=true \
+            --tmpfs "/tmp:rw,exec,nosuid,nodev,size=16m,mode=1777,uid=${sandbox_uid},gid=${sandbox_gid}" \
+            --tmpfs "/home/agent/.codex:rw,exec,nosuid,nodev,size=16m,mode=0700,uid=${sandbox_uid},gid=${sandbox_gid}" \
+            --tmpfs "/workspace:rw,exec,nosuid,nodev,size=16m,mode=0700,uid=${sandbox_uid},gid=${sandbox_gid}" \
+            "remoteagent/agent-base:${version}" sh -ceu '
+                codex_features=$(codex features list)
+                printf '\''%s\n'\'' "$codex_features" \
+                    | grep -Eq '\''^code_mode_host[[:space:]]+stable[[:space:]]+true$'\''
+                codex_native_path=$(find /usr/local/lib/node_modules/@openai/codex \
+                    -type f -name codex -perm -u+x -print -quit)
+                test -n "$codex_native_path"
+                code_mode_host_path=$(dirname "$codex_native_path")/codex-code-mode-host
+                test -x "$code_mode_host_path"
+                "$code_mode_host_path" --help >/dev/null
+            ' >/dev/null 2>&1; then
+        printf '%-34s %s\n' 'Codex local code-mode host' OK
+    else
+        printf '%-34s %s\n' 'Codex local code-mode host' FAILED
+        failures=$((failures + 1))
+    fi
+
+    if docker image inspect "remoteagent/agent-base:${version}" >/dev/null 2>&1 \
+        && docker run --rm --network none --read-only \
+            --user "${sandbox_uid}:${sandbox_gid}" \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
             --tmpfs "/tmp:rw,exec,nosuid,nodev,size=16m,mode=1777,uid=${sandbox_uid},gid=${sandbox_gid}" \
@@ -1768,13 +1830,26 @@ smoke_live() {
     require_command python3
     require_command curl
     auth_command status >/dev/null
+    local smoke_script="$ROOT_DIR/scripts/smoke_joke_agent.py"
+    if [[ "$agent_id" = repository-critic ]]; then
+        smoke_script="$ROOT_DIR/scripts/smoke_repository_critic.py"
+    fi
     REMOTEAGENT_SMOKE_URL="$(router_url)" \
     REMOTEAGENT_SMOKE_TOKEN="$(router_token)" \
     REMOTEAGENT_SMOKE_AGENT="$agent_id" \
     REMOTEAGENT_SMOKE_TIMEOUT="$timeout" \
     REMOTEAGENT_SMOKE_KEEP="$keep" \
     REMOTEAGENT_SMOKE_JSON="$JSON_OUTPUT" \
-        python3 "$ROOT_DIR/scripts/smoke_joke_agent.py"
+        python3 "$smoke_script"
+}
+
+smoke_network() {
+    (($# == 0)) || die "smoke network does not accept options"
+    load_env
+    require_command docker
+    require_command python3
+    REMOTEAGENT_NETWORK_PROBE_JSON="$JSON_OUTPUT" \
+        python3 "$ROOT_DIR/scripts/probe_managed_network.py"
 }
 
 bootstrap_command() {
@@ -1834,9 +1909,13 @@ case "$command_name" in
     doctor) doctor_command "$@" ;;
     upgrade) upgrade_command "$@" ;;
     smoke)
-        [[ "${1:-}" = live ]] || die "live smoke requires: smoke live"
-        shift
-        smoke_live "$@"
+        smoke_kind=${1:-}
+        shift || true
+        case "$smoke_kind" in
+            live) smoke_live "$@" ;;
+            network) smoke_network "$@" ;;
+            *) die "smoke requires one of: live, network" ;;
+        esac
         ;;
     *) die "unknown command: $command_name (run scripts/remotectl help)" ;;
 esac
