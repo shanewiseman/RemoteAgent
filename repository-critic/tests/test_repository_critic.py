@@ -10,6 +10,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 import venv
 
 
@@ -193,14 +194,108 @@ class DependencyPlanTests(unittest.TestCase):
             plan = critic._python_restore_plan(root, False, False)
             self.assertEqual(plan["mode"], "locked")
             self.assertEqual(plan["lockfile"], "requirements.txt")
-            self.assertEqual(plan["commands"][0], ["python3.12", "-m", "venv", ".venv"])
+            self.assertEqual(
+                plan["commands"][0],
+                ["python3.12", "-I", "-m", "venv", "--clear", ".venv"],
+            )
 
     def test_dependency_free_python_creates_only_venv(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             plan = critic._python_restore_plan(Path(temporary), False, False)
             self.assertEqual(plan["mode"], "locked")
             self.assertEqual(plan["manager"], "python-venv")
-            self.assertEqual(plan["commands"], [["python3.12", "-m", "venv", ".venv"]])
+            self.assertEqual(
+                plan["commands"],
+                [["python3.12", "-I", "-m", "venv", "--clear", ".venv"]],
+            )
+
+    def test_python_test_extra_is_selected_without_other_optional_dependencies(self) -> None:
+        pyproject = (
+            "[project]\nname='fixture'\nversion='1'\n"
+            "[project.optional-dependencies]\n"
+            "docs=['sphinx==9.0.0']\ntest=['pytest==8.4.2']\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+            (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+            plan = critic._python_restore_plan(root, False, False)
+            self.assertEqual(
+                plan["commands"],
+                [
+                    ["python3.12", "-I", "-m", "venv", "--clear", ".venv"],
+                    [
+                        "uv",
+                        "sync",
+                        "--locked",
+                        "--no-install-project",
+                        "--extra",
+                        "test",
+                        "--no-build",
+                    ]
+                ],
+            )
+            self.assertNotIn("docs", plan["commands"][1])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+            (root / "poetry.lock").write_text("package = []\n", encoding="utf-8")
+            plan = critic._python_restore_plan(root, False, False)
+            self.assertEqual(plan["commands"][1][-2:], ["--extras", "test"])
+            self.assertNotIn("docs", plan["commands"][1])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+            (root / "requirements.txt").write_text(
+                "runtime==1.0.0 --hash=sha256:" + "a" * 64 + "\n", encoding="utf-8"
+            )
+            with self.assertRaises(critic.CriticError) as raised:
+                critic._python_restore_plan(root, False, False)
+            self.assertEqual(raised.exception.kind, "blocked_dependency_restore")
+            with self.assertRaises(critic.CriticError) as unlocked_raised:
+                critic._python_restore_plan(root, True, False)
+            self.assertEqual(unlocked_raised.exception.kind, "blocked_dependency_restore")
+            self.assertIn("unified lock", str(unlocked_raised.exception))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pyproject.toml").write_text(
+                "[project]\nname='fixture'\nversion='1'\n"
+                "[project.optional-dependencies]\ntest=[]\n",
+                encoding="utf-8",
+            )
+            (root / "requirements.txt").write_text(
+                "runtime==1.0.0 --hash=sha256:" + "b" * 64 + "\n", encoding="utf-8"
+            )
+            plan = critic._python_restore_plan(root, False, False)
+            self.assertEqual(plan["manager"], "pip")
+            self.assertEqual(plan["mode"], "locked")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+            (root / "Pipfile.lock").write_text("{}\n", encoding="utf-8")
+            with self.assertRaises(critic.CriticError) as pipenv_raised:
+                critic._python_restore_plan(root, True, False)
+            self.assertEqual(pipenv_raised.exception.kind, "blocked_dependency_restore")
+            self.assertIn("unified dependency lock", str(pipenv_raised.exception))
+
+    def test_dependency_free_stdlib_tests_keep_isolated_venv_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "test_example.py").write_text(
+                "import unittest\n\nclass Example(unittest.TestCase):\n"
+                "    def test_example(self):\n        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            plan = critic._python_restore_plan(root, False, False)
+            self.assertEqual(plan["manager"], "python-venv")
+            self.assertEqual(
+                plan["commands"],
+                [["python3.12", "-I", "-m", "venv", "--clear", ".venv"]],
+            )
 
     def test_unlocked_pipenv_and_yarn4_suppress_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -208,7 +303,7 @@ class DependencyPlanTests(unittest.TestCase):
             (root / "Pipfile").write_text("[packages]\nrequests='*'\n", encoding="utf-8")
             pipenv = critic._python_restore_plan(root, True, False)
             self.assertEqual(pipenv["mode"], "resolved_unlocked")
-            self.assertEqual(pipenv["commands"][0], ["pipenv", "lock"])
+            self.assertEqual(pipenv["commands"][1], ["pipenv", "lock"])
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "package.json").write_text(
@@ -260,7 +355,7 @@ class ExecutionTests(unittest.TestCase):
     def test_test_phase_resolves_python_from_confined_project_venv(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             scratch = Path(temporary)
-            venv.EnvBuilder(with_pip=False).create(scratch / ".venv")
+            venv.EnvBuilder(with_pip=False, symlinks=True).create(scratch / ".venv")
             log = scratch / "venv.log"
             output = scratch / "venv.json"
             result = critic.command_run(
@@ -285,6 +380,234 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertIn(str(scratch / ".venv"), log.read_text(encoding="utf-8"))
             self.assertIsNone(critic.read_json(output)["restore_mode"])
+
+    def test_bare_python_test_tools_cannot_fall_through_to_global_path(self) -> None:
+        for phase, tool in (("test", "pytest"), ("test", "py.test"), ("coverage", "coverage")):
+            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as temporary:
+                scratch = Path(temporary)
+                venv.EnvBuilder(with_pip=False, symlinks=True).create(scratch / ".venv")
+                global_bin = scratch / "global-bin"
+                global_bin.mkdir()
+                sentinel = scratch / "global-tool-ran"
+                executable = global_bin / tool
+                executable.write_text(
+                    f"#!{sys.executable}\nfrom pathlib import Path\n"
+                    f"Path({str(sentinel)!r}).write_text('leaked')\n",
+                    encoding="utf-8",
+                )
+                executable.chmod(0o755)
+                output = scratch / "record.json"
+                with mock.patch.dict(
+                    os.environ,
+                    {"PATH": str(global_bin) + os.pathsep + os.environ.get("PATH", "")},
+                    clear=False,
+                ):
+                    result = critic.command_run(
+                        namespace(
+                            id=f"confine-{tool}",
+                            scratch_root=str(scratch),
+                            cwd=str(scratch),
+                            phase=phase,
+                            ecosystem="python",
+                            timeout=10,
+                            total_budget=30,
+                            disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                            log_limit=critic.LOG_LIMIT_BYTES,
+                            ledger=None,
+                            log=None,
+                            output=str(output),
+                            allow_build_hooks=False,
+                            restore_mode="locked",
+                            command=["--", tool],
+                        )
+                    )
+                self.assertEqual(result, 127)
+                self.assertFalse(sentinel.exists())
+                record = critic.read_json(output)
+                self.assertEqual(record["status"], "start_failed")
+                self.assertIn("project environment", record["limit_reason"])
+
+    def test_python_venv_reset_removes_preseeded_test_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            venv_bin = scratch / ".venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            sentinel = scratch / "preseeded-tool-ran"
+            (venv_bin / "pytest").write_text(
+                f"#!{sys.executable}\nfrom pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('leaked')\n",
+                encoding="utf-8",
+            )
+            (venv_bin / "pytest").chmod(0o755)
+            preseeded_module = (
+                scratch
+                / ".venv"
+                / "lib"
+                / "python3.12"
+                / "site-packages"
+                / "pytest"
+                / "__main__.py"
+            )
+            preseeded_module.parent.mkdir(parents=True)
+            preseeded_module.write_text(
+                f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('leaked')\n",
+                encoding="utf-8",
+            )
+            reset_result = critic.command_run(
+                namespace(
+                    id="reset-venv",
+                    scratch_root=str(scratch),
+                    cwd=str(scratch),
+                    phase="restore",
+                    ecosystem="python",
+                    timeout=30,
+                    total_budget=60,
+                    disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                    log_limit=critic.LOG_LIMIT_BYTES,
+                    ledger=None,
+                    log=None,
+                    output=None,
+                    allow_build_hooks=False,
+                    restore_mode="locked",
+                    command=["--", *critic.PYTHON_VENV_RESET_COMMAND],
+                )
+            )
+            self.assertEqual(reset_result, 0)
+            self.assertFalse((venv_bin / "pytest").exists())
+            self.assertFalse(preseeded_module.exists())
+
+            output = scratch / "pytest.json"
+            test_result = critic.command_run(
+                namespace(
+                    id="preseeded-pytest",
+                    scratch_root=str(scratch),
+                    cwd=str(scratch),
+                    phase="test",
+                    ecosystem="python",
+                    timeout=10,
+                    total_budget=60,
+                    disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                    log_limit=critic.LOG_LIMIT_BYTES,
+                    ledger=None,
+                    log=None,
+                    output=str(output),
+                    allow_build_hooks=False,
+                    restore_mode="locked",
+                    command=["--", "pytest"],
+                )
+            )
+            self.assertEqual(test_result, 127)
+            self.assertFalse(sentinel.exists())
+
+    def test_python_venv_reset_rejects_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            scratch = base / "scratch"
+            outside = base / "outside"
+            scratch.mkdir()
+            outside.mkdir()
+            (scratch / ".venv").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(critic.CriticError, "reset target"):
+                critic.command_run(
+                    namespace(
+                        id="reset-symlink",
+                        scratch_root=str(scratch),
+                        cwd=str(scratch),
+                        phase="restore",
+                        ecosystem="python",
+                        timeout=10,
+                        total_budget=30,
+                        disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                        log_limit=critic.LOG_LIMIT_BYTES,
+                        ledger=None,
+                        log=None,
+                        output=None,
+                        allow_build_hooks=False,
+                        restore_mode="locked",
+                        command=["--", *critic.PYTHON_VENV_RESET_COMMAND],
+                    )
+                )
+
+    def test_python_src_layout_uses_only_validated_scratch_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            scratch = base / "scratch"
+            scratch.mkdir()
+            venv.EnvBuilder(with_pip=False, symlinks=True).create(scratch / ".venv")
+            package = scratch / "src" / "fixture_package"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("VALUE = 'scratch-source'\n", encoding="utf-8")
+            outside = base / "outside"
+            outside_package = outside / "fixture_package"
+            outside_package.mkdir(parents=True)
+            (outside_package / "__init__.py").write_text("VALUE = 'outside-source'\n")
+            log = scratch / "src-layout.log"
+            output = scratch / "src-layout.json"
+            code = (
+                "import fixture_package,os,sys; print(fixture_package.VALUE); "
+                "print(sys.prefix); print(os.getenv('PYTHONPATH')); print(os.getenv('PYTHONHOME'))"
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"PYTHONPATH": str(outside), "PYTHONHOME": str(outside / "fake-home")},
+                clear=False,
+            ):
+                result = critic.command_run(
+                    namespace(
+                        id="src-layout",
+                        scratch_root=str(scratch),
+                        cwd=str(scratch),
+                        phase="test",
+                        ecosystem="python",
+                        timeout=10,
+                        total_budget=30,
+                        disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                        log_limit=critic.LOG_LIMIT_BYTES,
+                        ledger=None,
+                        log=str(log),
+                        output=str(output),
+                        allow_build_hooks=False,
+                        restore_mode="locked",
+                        command=["--", "python", "-c", code],
+                    )
+                )
+            self.assertEqual(result, 0)
+            text = log.read_text(encoding="utf-8")
+            self.assertIn("scratch-source", text)
+            self.assertNotIn("outside-source", text)
+            self.assertIn(str(scratch / ".venv"), text)
+            self.assertIn(str(scratch / "src"), text)
+            self.assertIn("None", text)
+
+    def test_python_src_layout_rejects_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            scratch = base / "scratch"
+            scratch.mkdir()
+            venv.EnvBuilder(with_pip=False, symlinks=True).create(scratch / ".venv")
+            outside = base / "outside"
+            outside.mkdir()
+            (scratch / "src").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(critic.CriticError, "src path"):
+                critic.command_run(
+                    namespace(
+                        id="src-symlink",
+                        scratch_root=str(scratch),
+                        cwd=str(scratch),
+                        phase="test",
+                        ecosystem="python",
+                        timeout=10,
+                        total_budget=30,
+                        disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                        log_limit=critic.LOG_LIMIT_BYTES,
+                        ledger=None,
+                        log=None,
+                        output=None,
+                        allow_build_hooks=False,
+                        restore_mode="locked",
+                        command=["--", "python", "-c", "pass"],
+                    )
+                )
 
     def test_test_phase_clears_proxy_and_redacts_log(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -334,10 +657,208 @@ class ExecutionTests(unittest.TestCase):
                     os.environ["EXAMPLE_TOKEN"] = previous_secret
             self.assertEqual(rc, 0)
             text = log.read_text(encoding="utf-8")
+            self.assertIsNone(critic.read_json(output)["managed_proxy_state"])
             self.assertNotIn("visible-secret", text)
             self.assertNotIn("do-not-copy", text)
             self.assertNotIn("proxy.example", text)
             self.assertIn("[REDACTED]", text)
+
+    def test_dead_inherited_loopback_proxy_blocks_restore_without_disclosure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            log = scratch / "restore.log"
+            output = scratch / "restore.json"
+            proxy_url = "http://127.0.0.1:49173"
+            command = ["--", sys.executable, "-c", "raise SystemExit('must not run')", "49173"]
+            with (
+                mock.patch.dict(os.environ, {"HTTPS_PROXY": proxy_url}, clear=False),
+                mock.patch.object(
+                    critic.socket,
+                    "create_connection",
+                    side_effect=ConnectionRefusedError("private endpoint detail"),
+                ),
+                mock.patch.object(critic.subprocess, "Popen") as popen,
+            ):
+                result = critic.command_run(
+                    namespace(
+                        id="dead-proxy",
+                        scratch_root=str(scratch),
+                        cwd=str(scratch),
+                        phase="restore",
+                        ecosystem="python",
+                        timeout=10,
+                        total_budget=30,
+                        disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                        log_limit=critic.LOG_LIMIT_BYTES,
+                        ledger=None,
+                        log=str(log),
+                        output=str(output),
+                        allow_build_hooks=False,
+                        restore_mode="locked",
+                        command=command,
+                    )
+                )
+
+            self.assertEqual(result, 1)
+            popen.assert_not_called()
+            record = critic.read_json(output)
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["limit_reason"], "managed_proxy_unavailable")
+            self.assertEqual(record["managed_proxy_state"], "unavailable")
+            self.assertIsNone(record["exit_code"])
+            self.assertEqual(
+                critic.read_json(scratch / ".critic-budget.json")["runs"], [record]
+            )
+            published_text = json.dumps(record, sort_keys=True) + log.read_text(encoding="utf-8")
+            self.assertNotIn(proxy_url, published_text)
+            self.assertNotIn("49173", published_text)
+            self.assertNotIn("private endpoint detail", published_text)
+            self.assertIn("managed_proxy_state: unavailable", published_text)
+            self.assertNotIn("managed_proxy_unavailable", critic.COVERAGE_STATUSES)
+
+    def test_captured_proxy_marker_cannot_override_successful_liveness_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            log = scratch / "restore.log"
+            output = scratch / "restore.json"
+            proxy_url = "http://localhost:49174"
+            connection = mock.MagicMock()
+            connection.__enter__.return_value = connection
+            code = (
+                "import os,sys,urllib.parse; "
+                "proxy=urllib.parse.urlsplit(os.environ['HTTPS_PROXY']); "
+                "print(os.environ['HTTPS_PROXY']); "
+                "sys.stderr.write(f'tunnel error: failed to create underlying connection "
+                "at {proxy.hostname}:{proxy.port}\\n'); sys.exit(4)"
+            )
+            with (
+                mock.patch.dict(os.environ, {"HTTPS_PROXY": proxy_url}, clear=False),
+                mock.patch.object(
+                    critic.socket, "create_connection", return_value=connection
+                ) as probe,
+            ):
+                result = critic.command_run(
+                    namespace(
+                        id="proxy-reset",
+                        scratch_root=str(scratch),
+                        cwd=str(scratch),
+                        phase="restore",
+                        ecosystem="python",
+                        timeout=10,
+                        total_budget=30,
+                        disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                        log_limit=critic.LOG_LIMIT_BYTES,
+                        ledger=None,
+                        log=str(log),
+                        output=str(output),
+                        allow_build_hooks=False,
+                        restore_mode="locked",
+                        command=["--", sys.executable, "-c", code],
+                    )
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(probe.call_count, 2)
+            record = critic.read_json(output)
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["exit_code"], 4)
+            self.assertIsNone(record["limit_reason"])
+            self.assertEqual(record["managed_proxy_state"], "available")
+            published_text = json.dumps(record, sort_keys=True) + log.read_text(encoding="utf-8")
+            self.assertNotIn(proxy_url, published_text)
+            self.assertNotIn("49174", published_text)
+            self.assertNotIn("localhost:", published_text)
+            self.assertIn("[REDACTED MANAGED PROXY]", published_text)
+
+    def test_restore_failure_requires_failed_post_run_probe_for_proxy_diagnosis(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            output = scratch / "restore.json"
+            connection = mock.MagicMock()
+            connection.__enter__.return_value = connection
+            with (
+                mock.patch.dict(
+                    os.environ, {"HTTPS_PROXY": "http://127.0.0.1:49176"}, clear=False
+                ),
+                mock.patch.object(
+                    critic.socket,
+                    "create_connection",
+                    side_effect=[connection, ConnectionRefusedError("private endpoint detail")],
+                ) as probe,
+            ):
+                result = critic.command_run(
+                    namespace(
+                        id="proxy-died",
+                        scratch_root=str(scratch),
+                        cwd=str(scratch),
+                        phase="restore",
+                        ecosystem="python",
+                        timeout=10,
+                        total_budget=30,
+                        disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                        log_limit=critic.LOG_LIMIT_BYTES,
+                        ledger=None,
+                        log=None,
+                        output=str(output),
+                        allow_build_hooks=False,
+                        restore_mode="locked",
+                        command=["--", sys.executable, "-c", "raise SystemExit(5)"],
+                    )
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(probe.call_count, 2)
+            record = critic.read_json(output)
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["managed_proxy_state"], "unavailable")
+            self.assertEqual(record["limit_reason"], "managed_proxy_unavailable")
+
+    def test_ordinary_restore_failure_keeps_existing_failure_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            output = scratch / "restore.json"
+            connection = mock.MagicMock()
+            connection.__enter__.return_value = connection
+            with (
+                mock.patch.dict(
+                    os.environ, {"HTTPS_PROXY": "http://127.0.0.1:49175"}, clear=False
+                ),
+                mock.patch.object(
+                    critic.socket, "create_connection", return_value=connection
+                ) as probe,
+            ):
+                result = critic.command_run(
+                    namespace(
+                        id="ordinary-failure",
+                        scratch_root=str(scratch),
+                        cwd=str(scratch),
+                        phase="restore",
+                        ecosystem="python",
+                        timeout=10,
+                        total_budget=30,
+                        disk_limit=critic.SCRATCH_LIMIT_BYTES,
+                        log_limit=critic.LOG_LIMIT_BYTES,
+                        ledger=None,
+                        log=None,
+                        output=str(output),
+                        allow_build_hooks=False,
+                        restore_mode="locked",
+                        command=[
+                            "--",
+                            sys.executable,
+                            "-c",
+                            "import sys; sys.stderr.write('version unavailable'); sys.exit(3)",
+                        ],
+                    )
+                )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(probe.call_count, 2)
+            record = critic.read_json(output)
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["exit_code"], 3)
+            self.assertIsNone(record["limit_reason"])
+            self.assertEqual(record["managed_proxy_state"], "available")
 
     def test_term_ignoring_descendant_is_killed_and_run_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -758,6 +1279,53 @@ class CoverageAndArtifactTests(unittest.TestCase):
             tampered_manifest["toolchains"]["runtimes"]["python"] = "0.0.0"
             with self.assertRaisesRegex(critic.CriticError, "baked toolchain"):
                 critic.validate_run_manifest(tampered_manifest, prepare, "job-final")
+            tampered_proxy_state = json.loads(json.dumps(run_manifest))
+            tampered_proxy_state["commands"][0]["managed_proxy_state"] = "endpoint-detail"
+            with self.assertRaisesRegex(critic.CriticError, "managed_proxy_state"):
+                critic.validate_run_manifest(tampered_proxy_state, prepare, "job-final")
+            legacy_manifest = json.loads(json.dumps(run_manifest))
+            legacy_manifest["commands"][0].pop("managed_proxy_state")
+            critic.validate_run_manifest(legacy_manifest, prepare, "job-final")
+            extra_command_field = json.loads(json.dumps(run_manifest))
+            extra_command_field["commands"][0]["proxy_url"] = "forbidden"
+            with self.assertRaisesRegex(critic.CriticError, "only supported fields"):
+                critic.validate_run_manifest(extra_command_field, prepare, "job-final")
+            unavailable_success = json.loads(json.dumps(run_manifest))
+            unavailable_success["commands"][0].update(
+                {
+                    "managed_proxy_state": "unavailable",
+                    "status": "success",
+                    "limit_reason": "managed_proxy_unavailable",
+                }
+            )
+            with self.assertRaisesRegex(critic.CriticError, "inconsistent failure evidence"):
+                critic.validate_run_manifest(unavailable_success, prepare, "job-final")
+            reason_without_state = json.loads(json.dumps(run_manifest))
+            reason_without_state["commands"][0].update(
+                {
+                    "managed_proxy_state": "available",
+                    "status": "failed",
+                    "limit_reason": "managed_proxy_unavailable",
+                }
+            )
+            with self.assertRaisesRegex(critic.CriticError, "requires unavailable state"):
+                critic.validate_run_manifest(reason_without_state, prepare, "job-final")
+            non_restore_proxy = json.loads(json.dumps(run_manifest))
+            non_restore_proxy["commands"][0].update(
+                {"phase": "test", "restore_mode": None, "managed_proxy_state": "available"}
+            )
+            with self.assertRaisesRegex(critic.CriticError, "non-restore"):
+                critic.validate_run_manifest(non_restore_proxy, prepare, "job-final")
+            endpoint_manifest = json.loads(json.dumps(run_manifest))
+            endpoint_manifest["commands"][0]["argv"].append("http://127.0.0.1:49179")
+            with (
+                mock.patch.dict(
+                    os.environ, {"HTTPS_PROXY": "http://127.0.0.1:49179"}, clear=False
+                ),
+                self.assertRaisesRegex(critic.CriticError, "proxy endpoint") as endpoint_error,
+            ):
+                critic.validate_run_manifest(endpoint_manifest, prepare, "job-final")
+            self.assertNotIn("49179", str(endpoint_error.exception))
             tampered_review = {**review, "environment": {"TOKEN": "unsafe"}}
             with self.assertRaisesRegex(critic.CriticError, "unsupported fields"):
                 critic.validate_repository_review(tampered_review, prepare)
@@ -805,6 +1373,10 @@ class CoverageAndArtifactTests(unittest.TestCase):
             self.assertEqual(final_manifest["cleanup"]["status"], "complete")
             self.assertTrue(final_manifest["cleanup"]["source_unchanged"])
             self.assertIsNotNone(final_manifest["finished_at"])
+            self.assertIn(
+                final_manifest["commands"][0]["managed_proxy_state"],
+                {None, "available", "unavailable"},
+            )
 
 
 class BuildInputsTests(unittest.TestCase):

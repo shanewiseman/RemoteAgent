@@ -117,6 +117,15 @@ Run documented commands before generic adapters, in this order:
    locks/vendor state. Unlocked resolution is allowed only in scratch and must
    be labeled `resolved_unlocked`, non-reproducible, and accompanied by the
    generated lock or exact dependency inventory and available integrity hashes.
+   For Python, the planner selects only a non-empty, explicitly declared PEP 621
+   `[project.optional-dependencies].test` extra; an empty list is absent, and it
+   never selects unrelated optional extras. A hashed `requirements.txt` or
+   Pipenv input alongside that separate extra is blocked even with unlocked
+   resolution because neither input is a unified lock for the combined
+   environment. Dependency-free projects retain an isolated empty venv so
+   documented stdlib tests can run. Bare `pytest`, `py.test`, and `coverage`
+   commands must resolve inside that scratch venv or fail before launch; never
+   borrow image-baked test packages to make undeclared tests run.
 3. Execute each returned restore argv separately with `run --phase restore
    --restore-mode MODE`, where `MODE` is the plan's exact `mode`. The bounded
    runner applies the approved package-manager environment; never apply an
@@ -132,7 +141,12 @@ Run documented commands before generic adapters, in this order:
    `$JOB_ROOT/.critic-budget.json` ledger. Copy that ledger's `runs` array
    exactly into `run-manifest.json.commands`; the finalizer rejects omissions,
    additions, or mutations. Restore command records carry their exact
-   `restore_mode`; non-restore records use `null`.
+   `restore_mode`; non-restore records use `null`. The current runner also emits
+   `managed_proxy_state` as `available`, `unavailable`, or `null`; schema-v1
+   validation accepts its omission for compatibility but rejects every other
+   extra command key. `unavailable` requires a failed loopback-listener probe
+   and matching failure reason—repository output cannot establish that state.
+   This readiness evidence never contains the proxy URL or port.
 6. Normalize native output with `normalize --scratch-root JOB_ROOT`; use only
    safe artifact-relative `--native-artifact` values. Aggregate project records
    with `aggregate-coverage`. Preserve partial measurements after failed tests.
@@ -162,9 +176,12 @@ lifecycle scripts.
 
 Consult [Ecosystem coverage tools](references/ecosystem-coverage-tools.md) for
 the exact locked restore and generic coverage commands. Python restores default
-to wheels and no root-project installation. npm, pnpm, and Yarn suppress
-scripts unless the current-prompt sentinel is present. Go sets
-`GOTOOLCHAIN=local`; do not auto-download another Go toolchain.
+to wheels and no root-project installation. For Python test, coverage, and
+static phases, discard inherited `PYTHONHOME`/`PYTHONPATH`; when a real confined
+`src/` directory exists, use it as the sole `PYTHONPATH` entry so no-root
+`src`-layout projects remain importable. npm, pnpm, and Yarn suppress scripts
+unless the current-prompt sentinel is present. Go sets `GOTOOLCHAIN=local`; do
+not auto-download another Go toolchain.
 
 ## Artifact contract
 
@@ -279,10 +296,13 @@ branch/function metrics are `null` and its metric basis is statement blocks.
 `run-manifest.json` schema version 1 records the job/timestamps/duration,
 repository provenance, exact enforced limits (including `max_artifacts: 6`),
 the complete baked toolchain manifest, network and hook policy, sanitized
-command records, restore mode/lock/integrity evidence, cleanup result, and
-limitations. Before finalization use `cleanup: {"status": "pending"}`; the
-helper replaces it. It must never contain raw environment values or
-stdout/stderr fields.
+command records (including nullable `managed_proxy_state`), restore
+mode/lock/integrity evidence, cleanup result, and limitations. Before
+finalization use `cleanup: {"status": "pending"}`; the helper replaces it. It
+must never contain raw environment values, proxy addresses or ports, or
+stdout/stderr fields. Finalization recursively redacts the inherited managed
+proxy from every published text, JSON string, and combined log, and compares
+the command ledger only after applying the same sanitization.
 
 Each `dependency_restores` entry has this exact evidence shape:
 

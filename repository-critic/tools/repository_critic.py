@@ -15,12 +15,15 @@ import dataclasses
 import datetime as dt
 import gzip
 import hashlib
+import ipaddress
 import json
+import math
 import os
 import pathlib
 import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -49,6 +52,13 @@ PRIMARY_ARTIFACT_LIMIT_BYTES = 16 * 1024 * 1024
 TRUSTED_RECORD_LIMIT_BYTES = 16 * 1024 * 1024
 PREPARE_RECORD_LIMIT_BYTES = 1024 * 1024
 TERMINATE_GRACE_SECONDS = 10
+MANAGED_PROXY_PROBE_TIMEOUT_SECONDS = 0.5
+MANAGED_PROXY_UNAVAILABLE = "managed_proxy_unavailable"
+MANAGED_PROXY_URL_AUTHORITY_RE = re.compile(
+    r"https?://(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3}|\[[0-9a-f:.%]+\]):[0-9]+",
+    flags=re.I,
+)
+PYTHON_VENV_RESET_COMMAND = ("python3.12", "-I", "-m", "venv", "--clear", ".venv")
 
 COVERAGE_STATUSES = {
     "complete",
@@ -112,6 +122,15 @@ class CriticError(RuntimeError):
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _is_finite_number(value: Any) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def atomic_write_json(path: pathlib.Path, value: Any) -> None:
@@ -680,8 +699,11 @@ class StreamCapture:
             if len(block) > available:
                 self.truncated = True
 
+    def decoded_text(self) -> str:
+        return self.content.decode("utf-8", "replace")
+
     def text(self) -> str:
-        return redact_text(self.content.decode("utf-8", "replace"))
+        return redact_text(self.decoded_text())
 
 
 def _load_budget(path: pathlib.Path) -> dict[str, Any]:
@@ -733,6 +755,151 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> str | None:
     return "SIGTERM"
 
 
+@dataclasses.dataclass(frozen=True)
+class _ManagedProxyEndpoint:
+    """A validated loopback proxy endpoint that is never serialized."""
+
+    host: str
+    port: int
+    probe_hosts: tuple[str, ...]
+
+
+class _ManagedProxyUnavailableError(RuntimeError):
+    """Internal control flow for a failed, sanitized proxy readiness check."""
+
+
+class _ProjectPythonToolUnavailableError(RuntimeError):
+    """Internal control flow when a bare tool is absent from the project venv."""
+
+
+def _managed_loopback_proxy_endpoint(value: str | None) -> _ManagedProxyEndpoint | None:
+    """Return a safe-to-probe endpoint only for an explicit loopback proxy URL."""
+
+    if not value:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        host = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not host
+        or port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    normalized_host = host.lower()
+    if normalized_host == "localhost":
+        return _ManagedProxyEndpoint(
+            host=normalized_host,
+            port=port,
+            probe_hosts=("127.0.0.1", "::1"),
+        )
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        return None
+    if not address.is_loopback:
+        return None
+    compressed = address.compressed
+    return _ManagedProxyEndpoint(host=compressed, port=port, probe_hosts=(compressed,))
+
+
+def _managed_proxy_is_available(endpoint: _ManagedProxyEndpoint) -> bool:
+    """Probe only a validated loopback address and suppress endpoint-bearing errors."""
+
+    for host in endpoint.probe_hosts:
+        try:
+            with socket.create_connection(
+                (host, endpoint.port), timeout=MANAGED_PROXY_PROBE_TIMEOUT_SECONDS
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _redact_managed_proxy_details(
+    value: str,
+    inherited_proxy: str | None,
+    endpoint: _ManagedProxyEndpoint | None,
+) -> str:
+    """Remove inherited proxy values and endpoint details from published text."""
+
+    redacted = value
+    if inherited_proxy:
+        redacted = redacted.replace(inherited_proxy, "[REDACTED MANAGED PROXY]")
+    redaction_host = endpoint.host if endpoint is not None else None
+    redaction_port = endpoint.port if endpoint is not None else None
+    if inherited_proxy and (redaction_host is None or redaction_port is None):
+        try:
+            parsed = urllib.parse.urlsplit(inherited_proxy)
+            redaction_host = parsed.hostname
+            redaction_port = parsed.port
+        except (TypeError, ValueError):
+            pass
+    if redaction_host is not None and redaction_port is not None:
+        def redact_equivalent_url(match: re.Match[str]) -> str:
+            candidate = _managed_loopback_proxy_endpoint(match.group(0))
+            if candidate is not None and candidate.port == redaction_port:
+                return "[REDACTED MANAGED PROXY]"
+            return match.group(0)
+
+        redacted = MANAGED_PROXY_URL_AUTHORITY_RE.sub(redact_equivalent_url, redacted)
+        endpoint_tokens = {
+            f"{redaction_host}:{redaction_port}",
+            f"[{redaction_host}]:{redaction_port}",
+            f"127.0.0.1:{redaction_port}",
+            f"[::1]:{redaction_port}",
+            f"localhost:{redaction_port}",
+        }
+        for token in sorted(endpoint_tokens, key=len, reverse=True):
+            redacted = re.sub(re.escape(token), "[REDACTED MANAGED PROXY]", redacted, flags=re.I)
+        redacted = re.sub(
+            rf"(?<!\d){redaction_port}(?!\d)", "[REDACTED MANAGED PROXY PORT]", redacted
+        )
+    return redact_text(redacted)
+
+
+def _sanitize_command_argv(
+    command: Sequence[str],
+    inherited_proxy: str | None,
+    endpoint: _ManagedProxyEndpoint | None,
+) -> list[str]:
+    proxy_redacted = [
+        _redact_managed_proxy_details(item, inherited_proxy, endpoint) for item in command
+    ]
+    return sanitize_argv(proxy_redacted)
+
+
+def _iter_string_values(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from _iter_string_values(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_string_values(item)
+
+
+def _contains_inherited_managed_proxy_details(value: Any) -> bool:
+    inherited_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    endpoint = _managed_loopback_proxy_endpoint(inherited_proxy)
+    if endpoint is None:
+        return False
+    return any(
+        _redact_managed_proxy_details(item, inherited_proxy, endpoint) != redact_text(item)
+        for item in _iter_string_values(value)
+    )
+
+
 def safe_subprocess_environment(
     scratch_root: pathlib.Path,
     allow_build_hooks: bool,
@@ -752,6 +919,8 @@ def safe_subprocess_environment(
         "npm_config_script_shell",
         "BASH_ENV",
         "ENV",
+        "PYTHONHOME",
+        "PYTHONPATH",
     ):
         environment.pop(unsafe_name, None)
     home = scratch_root / "home"
@@ -856,7 +1025,7 @@ def safe_subprocess_environment(
 
 def _activate_project_venv(
     environment: dict[str, str], cwd: pathlib.Path, scratch_root: pathlib.Path
-) -> None:
+) -> pathlib.Path | None:
     venv = cwd / ".venv"
     configuration = venv / "pyvenv.cfg"
     binary_directory = venv / "bin"
@@ -867,11 +1036,50 @@ def _activate_project_venv(
         or binary_directory.is_symlink()
         or not binary_directory.is_dir()
     ):
-        return
+        return None
     ensure_within(venv, scratch_root, "project virtual environment")
     ensure_within(binary_directory, scratch_root, "project virtual environment binaries")
     environment["VIRTUAL_ENV"] = str(venv)
     environment["PATH"] = str(binary_directory) + os.pathsep + environment.get("PATH", "")
+    return binary_directory
+
+
+def _confine_bare_python_tool(
+    command: list[str], binary_directory: pathlib.Path | None, scratch_root: pathlib.Path
+) -> None:
+    if command[0] not in {"pytest", "py.test", "coverage"}:
+        return
+    if binary_directory is None:
+        raise _ProjectPythonToolUnavailableError
+    executable = ensure_within(
+        binary_directory / command[0], scratch_root, "project Python test tool"
+    )
+    if not executable.is_file():
+        raise _ProjectPythonToolUnavailableError
+    command[0] = str(executable)
+
+
+def _configure_python_source_path(
+    environment: dict[str, str], cwd: pathlib.Path, scratch_root: pathlib.Path
+) -> None:
+    source_directory = cwd / "src"
+    if not source_directory.exists() and not source_directory.is_symlink():
+        return
+    if source_directory.is_symlink() or not source_directory.is_dir():
+        raise CriticError("conventional Python src path must be a real directory")
+    source_directory = ensure_within(
+        source_directory, scratch_root, "conventional Python src path"
+    )
+    environment["PYTHONPATH"] = str(source_directory)
+
+
+def _validate_python_venv_reset(cwd: pathlib.Path, scratch_root: pathlib.Path) -> None:
+    venv = cwd / ".venv"
+    if venv.is_symlink():
+        raise CriticError("project virtual environment reset target must not be a symlink")
+    resolved = ensure_within(venv, scratch_root, "project virtual environment reset target")
+    if resolved.exists() and not resolved.is_dir():
+        raise CriticError("project virtual environment reset target must be a directory")
 
 
 def command_run(args: argparse.Namespace) -> int:
@@ -886,6 +1094,10 @@ def command_run(args: argparse.Namespace) -> int:
         raise CriticError("run requires argv after --")
     if "\x00" in "".join(command):
         raise CriticError("command argv contains a NUL byte")
+    inherited_proxy = None
+    if args.phase == "restore":
+        inherited_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    managed_proxy_endpoint = _managed_loopback_proxy_endpoint(inherited_proxy)
 
     phase_limit = RESTORE_TIMEOUT_SECONDS if args.phase == "restore" else TEST_TIMEOUT_SECONDS
     requested_timeout = args.timeout if args.timeout is not None else phase_limit
@@ -913,7 +1125,7 @@ def command_run(args: argparse.Namespace) -> int:
         record = {
             "id": args.id,
             "cwd": str(cwd),
-            "argv": sanitize_argv(command),
+            "argv": _sanitize_command_argv(command, inherited_proxy, managed_proxy_endpoint),
             "ecosystem": args.ecosystem,
             "phase": args.phase,
             "restore_mode": args.restore_mode if args.phase == "restore" else None,
@@ -925,6 +1137,7 @@ def command_run(args: argparse.Namespace) -> int:
             "stdout_truncated": False,
             "stderr_truncated": False,
             "build_hooks_enabled": bool(args.allow_build_hooks),
+            "managed_proxy_state": None,
             "limit_reason": "total dynamic-analysis budget exhausted",
         }
         if output_path:
@@ -946,6 +1159,7 @@ def command_run(args: argparse.Namespace) -> int:
     terminating_signal: str | None = None
     status = "start_failed"
     limit_reason: str | None = None
+    managed_proxy_state: str | None = None
     try:
         command_environment = safe_subprocess_environment(
             scratch_root,
@@ -953,8 +1167,21 @@ def command_run(args: argparse.Namespace) -> int:
             phase=args.phase,
             restore_mode=args.restore_mode,
         )
+        if args.phase == "restore":
+            inherited_proxy = command_environment.get("HTTPS_PROXY")
+            managed_proxy_endpoint = _managed_loopback_proxy_endpoint(inherited_proxy)
+            if managed_proxy_endpoint is not None:
+                if not _managed_proxy_is_available(managed_proxy_endpoint):
+                    managed_proxy_state = "unavailable"
+                    raise _ManagedProxyUnavailableError
+                managed_proxy_state = "available"
+            if args.ecosystem == "python" and tuple(command) == PYTHON_VENV_RESET_COMMAND:
+                _validate_python_venv_reset(cwd, scratch_root)
         if args.phase in {"test", "coverage", "static"}:
-            _activate_project_venv(command_environment, cwd, scratch_root)
+            binary_directory = _activate_project_venv(command_environment, cwd, scratch_root)
+            if args.ecosystem == "python":
+                _configure_python_source_path(command_environment, cwd, scratch_root)
+                _confine_bare_python_tool(command, binary_directory, scratch_root)
         process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -994,10 +1221,18 @@ def command_run(args: argparse.Namespace) -> int:
                 terminating_signal = f"{descendant_signal}_DESCENDANTS"
                 limit_reason = "terminated subprocess descendants left running after launcher exit"
                 status = "failed"
+    except _ManagedProxyUnavailableError:
+        limit_reason = MANAGED_PROXY_UNAVAILABLE
+        status = "failed"
+    except _ProjectPythonToolUnavailableError:
+        limit_reason = "requested bare Python test tool is absent from the project environment"
+        status = "start_failed"
     except OSError as exc:
         if process is not None:
             terminating_signal = _terminate_process_group(process)
-        limit_reason = redact_text(str(exc))
+        limit_reason = _redact_managed_proxy_details(
+            str(exc), inherited_proxy, managed_proxy_endpoint
+        )
         status = "start_failed"
     except BaseException:
         if process is not None:
@@ -1014,17 +1249,29 @@ def command_run(args: argparse.Namespace) -> int:
             if process.stderr is not None:
                 process.stderr.close()
 
+    if status == "failed" and limit_reason is None and managed_proxy_endpoint is not None:
+        if not _managed_proxy_is_available(managed_proxy_endpoint):
+            limit_reason = MANAGED_PROXY_UNAVAILABLE
+            managed_proxy_state = "unavailable"
+
     duration = round(time.monotonic() - started, 6)
+    sanitized_command = _sanitize_command_argv(
+        command, inherited_proxy, managed_proxy_endpoint
+    )
+    proxy_diagnostic = (
+        f"managed_proxy_state: {managed_proxy_state}\n" if managed_proxy_state is not None else ""
+    )
     combined_log = (
         f"# command {args.id}\n"
-        f"argv: {json.dumps(sanitize_argv(command), ensure_ascii=False)}\n"
+        f"argv: {json.dumps(sanitized_command, ensure_ascii=False)}\n"
         f"cwd: {cwd}\n"
         f"phase: {args.phase}\n"
-        f"status: {status}\n\n"
+        f"status: {status}\n"
+        f"{proxy_diagnostic}\n"
         "## stdout\n"
-        f"{stdout_capture.text()}\n\n"
+        f"{_redact_managed_proxy_details(stdout_capture.decoded_text(), inherited_proxy, managed_proxy_endpoint)}\n\n"
         "## stderr\n"
-        f"{stderr_capture.text()}\n"
+        f"{_redact_managed_proxy_details(stderr_capture.decoded_text(), inherited_proxy, managed_proxy_endpoint)}\n"
     )
     combined_bytes = combined_log.encode("utf-8")
     combined_truncated = len(combined_bytes) > log_limit
@@ -1036,7 +1283,7 @@ def command_run(args: argparse.Namespace) -> int:
     record = {
         "id": args.id,
         "cwd": str(cwd),
-        "argv": sanitize_argv(command),
+        "argv": sanitized_command,
         "ecosystem": args.ecosystem,
         "phase": args.phase,
         "restore_mode": args.restore_mode if args.phase == "restore" else None,
@@ -1048,6 +1295,7 @@ def command_run(args: argparse.Namespace) -> int:
         "stdout_truncated": stdout_capture.truncated or combined_truncated,
         "stderr_truncated": stderr_capture.truncated or combined_truncated,
         "build_hooks_enabled": bool(args.allow_build_hooks),
+        "managed_proxy_state": managed_proxy_state,
         "limit_reason": limit_reason,
     }
     ledger.setdefault("runs", []).append(record)
@@ -1553,20 +1801,58 @@ def _requirements_are_hashed(path: pathlib.Path) -> bool:
     return bool(entries) and all("==" in line and "--hash=" in line for line in entries)
 
 
+def _python_test_extras(root: pathlib.Path) -> tuple[str, ...]:
+    """Select only the narrow, conventional PEP 621 test extra when declared."""
+
+    path = root / "pyproject.toml"
+    if not path.is_file():
+        return ()
+    try:
+        with path.open("rb") as handle:
+            pyproject = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise CriticError(f"invalid pyproject.toml: {exc}") from exc
+    project = pyproject.get("project", {})
+    if not isinstance(project, dict):
+        return ()
+    optional = project.get("optional-dependencies", {})
+    if not isinstance(optional, dict) or "test" not in optional:
+        return ()
+    dependencies = optional["test"]
+    if not isinstance(dependencies, list) or not all(
+        isinstance(dependency, str) for dependency in dependencies
+    ):
+        raise CriticError("project.optional-dependencies.test must be a string array")
+    return ("test",) if dependencies else ()
+
+
 def _python_restore_plan(root: pathlib.Path, allow_unlocked: bool, hooks: bool) -> dict[str, Any]:
     environment = {
         "PIP_ONLY_BINARY": "" if hooks else ":all:",
         "POETRY_INSTALLER_ONLY_BINARY": "" if hooks else ":all:",
     }
     no_build = [] if hooks else ["--no-build"]
-    create_venv = ["python3.12", "-m", "venv", ".venv"]
+    reset_venv = list(PYTHON_VENV_RESET_COMMAND)
+    test_extras = _python_test_extras(root)
+    uv_test_extra_args = [item for extra in test_extras for item in ("--extra", extra)]
+    poetry_test_extra_args = [item for extra in test_extras for item in ("--extras", extra)]
     if (root / "uv.lock").is_file():
         return {
             "manager": "uv",
             "manager_version": "0.12.9",
             "mode": "locked",
             "lockfile": "uv.lock",
-            "commands": [["uv", "sync", "--locked", "--no-install-project", *no_build]],
+            "commands": [
+                reset_venv,
+                [
+                    "uv",
+                    "sync",
+                    "--locked",
+                    "--no-install-project",
+                    *uv_test_extra_args,
+                    *no_build,
+                ]
+            ],
             "environment": environment,
         }
     if (root / "poetry.lock").is_file():
@@ -1575,20 +1861,40 @@ def _python_restore_plan(root: pathlib.Path, allow_unlocked: bool, hooks: bool) 
             "manager_version": "2.4.2",
             "mode": "locked",
             "lockfile": "poetry.lock",
-            "commands": [["poetry", "install", "--no-root", "--no-interaction", "--no-ansi"]],
+            "commands": [
+                reset_venv,
+                [
+                    "poetry",
+                    "install",
+                    "--no-root",
+                    "--no-interaction",
+                    "--no-ansi",
+                    *poetry_test_extra_args,
+                ]
+            ],
             "environment": environment,
         }
     if (root / "Pipfile.lock").is_file():
+        if test_extras:
+            raise CriticError(
+                "Pipfile.lock and a separate project test extra require a unified dependency lock",
+                kind="blocked_dependency_restore",
+            )
         return {
             "manager": "pipenv",
             "manager_version": "2026.8.0",
             "mode": "locked",
             "lockfile": "Pipfile.lock",
-            "commands": [["pipenv", "sync", "--dev"], ["pipenv", "requirements", "--dev"]],
+            "commands": [
+                reset_venv,
+                ["pipenv", "sync", "--dev"],
+                ["pipenv", "requirements", "--dev"],
+            ],
             "environment": {**environment, "PIPENV_VENV_IN_PROJECT": "1"},
         }
     requirements = root / "requirements.txt"
-    if requirements.is_file() and _requirements_are_hashed(requirements):
+    requirements_are_hashed = requirements.is_file() and _requirements_are_hashed(requirements)
+    if requirements_are_hashed and not test_extras:
         command = [
             "uv",
             "pip",
@@ -1605,9 +1911,18 @@ def _python_restore_plan(root: pathlib.Path, allow_unlocked: bool, hooks: bool) 
             "manager_version": "bundled-with-python-3.12.14",
             "mode": "locked",
             "lockfile": "requirements.txt",
-            "commands": [create_venv, command, ["uv", "pip", "freeze", "--python", ".venv/bin/python"]],
+            "commands": [
+                reset_venv,
+                command,
+                ["uv", "pip", "freeze", "--python", ".venv/bin/python"],
+            ],
             "environment": environment,
         }
+    if requirements_are_hashed and test_extras:
+        raise CriticError(
+            "hashed requirements and a separate project test extra cannot be combined without an explicit unified lock",
+            kind="blocked_dependency_restore",
+        )
     if not any(
         (root / name).is_file()
         for name in ("pyproject.toml", "requirements.txt", "Pipfile", "Pipfile.lock")
@@ -1617,18 +1932,24 @@ def _python_restore_plan(root: pathlib.Path, allow_unlocked: bool, hooks: bool) 
             "manager_version": "3.12.14",
             "mode": "locked",
             "lockfile": "dependency-free",
-            "commands": [create_venv],
+            "commands": [reset_venv],
             "environment": environment,
         }
     if not allow_unlocked:
         raise CriticError("Python project has no supported locked dependency input", kind="blocked_dependency_restore")
     if (root / "Pipfile").is_file():
+        if test_extras:
+            raise CriticError(
+                "Pipfile and a separate project test extra require a unified dependency lock",
+                kind="blocked_dependency_restore",
+            )
         return {
             "manager": "pipenv",
             "manager_version": "2026.8.0",
             "mode": "resolved_unlocked",
             "lockfile": "Pipfile.lock (generated in scratch)",
             "commands": [
+                reset_venv,
                 ["pipenv", "lock"],
                 ["pipenv", "sync", "--dev"],
                 ["pipenv", "requirements", "--dev"],
@@ -1649,8 +1970,16 @@ def _python_restore_plan(root: pathlib.Path, allow_unlocked: bool, hooks: bool) 
                 "mode": "resolved_unlocked",
                 "lockfile": "poetry.lock (generated in scratch)",
                 "commands": [
+                    reset_venv,
                     ["poetry", "lock"],
-                    ["poetry", "install", "--no-root", "--no-interaction", "--no-ansi"],
+                    [
+                        "poetry",
+                        "install",
+                        "--no-root",
+                        "--no-interaction",
+                        "--no-ansi",
+                        *poetry_test_extra_args,
+                    ],
                     ["poetry", "show", "--tree"],
                 ],
                 "environment": environment,
@@ -1662,8 +1991,16 @@ def _python_restore_plan(root: pathlib.Path, allow_unlocked: bool, hooks: bool) 
             "mode": "resolved_unlocked",
             "lockfile": "uv.lock (generated in scratch)",
             "commands": [
+                reset_venv,
                 ["uv", "lock", *no_build],
-                ["uv", "sync", "--locked", "--no-install-project", *no_build],
+                [
+                    "uv",
+                    "sync",
+                    "--locked",
+                    "--no-install-project",
+                    *uv_test_extra_args,
+                    *no_build,
+                ],
                 ["uv", "pip", "freeze"],
             ],
             "environment": environment,
@@ -1698,8 +2035,8 @@ def _python_restore_plan(root: pathlib.Path, allow_unlocked: bool, hooks: bool) 
             "mode": "resolved_unlocked",
             "lockfile": ".repository-critic.requirements.lock (generated in scratch)",
             "commands": [
+                reset_venv,
                 compile_command,
-                create_venv,
                 install_command,
                 ["uv", "pip", "freeze", "--python", ".venv/bin/python"],
             ],
@@ -1710,7 +2047,7 @@ def _python_restore_plan(root: pathlib.Path, allow_unlocked: bool, hooks: bool) 
         "manager_version": "3.12.14",
         "mode": "locked",
         "lockfile": "dependency-free",
-        "commands": [create_venv],
+        "commands": [reset_venv],
         "environment": environment,
     }
 
@@ -2551,7 +2888,10 @@ def _validate_metric(value: Any, name: str, *, nullable: bool) -> None:
     if expected is None:
         if percent is not None:
             raise CriticError(f"coverage metric {name} must use null percent for a zero denominator")
-    elif not isinstance(percent, (int, float)) or isinstance(percent, bool) or abs(float(percent) - expected) > 0.0001:
+    elif (
+        not _is_finite_number(percent)
+        or abs(float(percent) - expected) > 0.0001
+    ):
         raise CriticError(f"coverage metric {name} percent does not match its counts")
 
 
@@ -2756,13 +3096,20 @@ def _normalized_tar_info(info: tarfile.TarInfo) -> tarfile.TarInfo:
     return info
 
 
-def _sanitize_json_strings(value: Any) -> Any:
+def _sanitize_json_strings(
+    value: Any,
+    inherited_proxy: str | None = None,
+    endpoint: _ManagedProxyEndpoint | None = None,
+) -> Any:
     if isinstance(value, str):
-        return redact_text(value)
+        return _redact_managed_proxy_details(value, inherited_proxy, endpoint)
     if isinstance(value, list):
-        return [_sanitize_json_strings(item) for item in value]
+        return [_sanitize_json_strings(item, inherited_proxy, endpoint) for item in value]
     if isinstance(value, dict):
-        return {str(key): _sanitize_json_strings(item) for key, item in value.items()}
+        return {
+            str(key): _sanitize_json_strings(item, inherited_proxy, endpoint)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -3025,9 +3372,10 @@ def validate_run_manifest(manifest: Any, prepare: Mapping[str, Any], job_id: str
     _parse_timestamp(manifest["started_at"], "run manifest started_at")
     if manifest["finished_at"] is not None:
         _parse_timestamp(manifest["finished_at"], "run manifest finished_at")
-    if not isinstance(manifest["total_duration_seconds"], (int, float)) or isinstance(
-        manifest["total_duration_seconds"], bool
-    ) or manifest["total_duration_seconds"] < 0:
+    if (
+        not _is_finite_number(manifest["total_duration_seconds"])
+        or manifest["total_duration_seconds"] < 0
+    ):
         raise CriticError("run manifest total_duration_seconds must be non-negative")
     repository = manifest["repository"]
     expected_repository = {
@@ -3082,10 +3430,17 @@ def validate_run_manifest(manifest: Any, prepare: Mapping[str, Any], job_id: str
         "build_hooks_enabled",
         "limit_reason",
     }
+    command_optional = {"managed_proxy_state"}
     scratch_root = pathlib.Path(str(prepare.get("scratch_root", ""))).resolve(strict=False)
     for command in manifest["commands"]:
-        if not isinstance(command, dict) or command_required - set(command):
-            raise CriticError("run manifest command is missing required fields")
+        if (
+            not isinstance(command, dict)
+            or command_required - set(command)
+            or set(command) - command_required - command_optional
+        ):
+            raise CriticError("run manifest command must contain only supported fields")
+        if _contains_inherited_managed_proxy_details(command):
+            raise CriticError("run manifest command contains managed proxy endpoint details")
         if not isinstance(command["id"], str) or not command["id"] or command["id"] in command_ids:
             raise CriticError("run manifest command ids must be non-empty and unique")
         command_ids.add(command["id"])
@@ -3107,9 +3462,10 @@ def validate_run_manifest(manifest: Any, prepare: Mapping[str, Any], job_id: str
         if command["ecosystem"] not in {"python", "javascript-typescript", "go", "other"}:
             raise CriticError("run manifest command ecosystem is invalid")
         _parse_timestamp(command["started_at"], "run manifest command started_at")
-        if not isinstance(command["duration_seconds"], (int, float)) or isinstance(
-            command["duration_seconds"], bool
-        ) or command["duration_seconds"] < 0:
+        if (
+            not _is_finite_number(command["duration_seconds"])
+            or command["duration_seconds"] < 0
+        ):
             raise CriticError("run manifest command duration is invalid")
         if command["exit_code"] is not None and (
             not isinstance(command["exit_code"], int) or isinstance(command["exit_code"], bool)
@@ -3126,6 +3482,27 @@ def validate_run_manifest(manifest: Any, prepare: Mapping[str, Any], job_id: str
         for key in ("stdout_truncated", "stderr_truncated", "build_hooks_enabled"):
             if not isinstance(command[key], bool):
                 raise CriticError(f"run manifest command {key} must be boolean")
+        for key in ("signal", "limit_reason"):
+            if command[key] is not None and not isinstance(command[key], str):
+                raise CriticError(f"run manifest command {key} must be text or null")
+        managed_proxy_state = command.get("managed_proxy_state")
+        if managed_proxy_state is not None and (
+            not isinstance(managed_proxy_state, str)
+            or managed_proxy_state not in {"available", "unavailable"}
+        ):
+            raise CriticError("run manifest command managed_proxy_state is invalid")
+        if command["phase"] != "restore" and managed_proxy_state is not None:
+            raise CriticError("non-restore command managed_proxy_state must be null")
+        if managed_proxy_state == "unavailable" and (
+            command["status"] != "failed"
+            or command["limit_reason"] != MANAGED_PROXY_UNAVAILABLE
+        ):
+            raise CriticError("unavailable managed proxy state has inconsistent failure evidence")
+        if (
+            command["limit_reason"] == MANAGED_PROXY_UNAVAILABLE
+            and managed_proxy_state != "unavailable"
+        ):
+            raise CriticError("managed proxy failure reason requires unavailable state")
     restores = manifest["dependency_restores"]
     if not isinstance(restores, list):
         raise CriticError("run manifest dependency_restores must be an array")
@@ -3289,9 +3666,10 @@ def _validate_cleanup(cleanup: Mapping[str, Any], job_id: str) -> None:
     if cleanup.get("job_id") != job_id or cleanup.get("status") not in {"complete", "partial"}:
         raise CriticError("run manifest cleanup result has invalid job/status")
     _parse_timestamp(cleanup.get("finished_at"), "run manifest cleanup finished_at")
-    if not isinstance(cleanup.get("duration_seconds"), (int, float)) or isinstance(
-        cleanup.get("duration_seconds"), bool
-    ) or cleanup["duration_seconds"] < 0:
+    if (
+        not _is_finite_number(cleanup.get("duration_seconds"))
+        or cleanup["duration_seconds"] < 0
+    ):
         raise CriticError("run manifest cleanup duration is invalid")
     for key in ("source_unchanged", "scratch_removed"):
         if not isinstance(cleanup.get(key), bool):
@@ -3446,7 +3824,11 @@ def _validate_command_ledger(manifest: Mapping[str, Any], scratch_root: pathlib.
         if manifest["commands"]:
             raise CriticError("run manifest commands exist without the helper command ledger")
         return
-    ledger = read_json(ledger_path)
+    inherited_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    managed_proxy_endpoint = _managed_loopback_proxy_endpoint(inherited_proxy)
+    ledger = _sanitize_json_strings(
+        read_json(ledger_path), inherited_proxy, managed_proxy_endpoint
+    )
     if not isinstance(ledger, dict) or set(ledger) != {
         "schema_version",
         "spent_seconds",
@@ -3456,18 +3838,24 @@ def _validate_command_ledger(manifest: Mapping[str, Any], scratch_root: pathlib.
     if ledger["schema_version"] != SCHEMA_VERSION or not isinstance(ledger["runs"], list):
         raise CriticError("dynamic command ledger schema is invalid")
     spent = ledger["spent_seconds"]
-    if not isinstance(spent, (int, float)) or isinstance(spent, bool) or spent < 0:
+    if (
+        not _is_finite_number(spent)
+        or spent < 0
+    ):
         raise CriticError("dynamic command ledger spent_seconds is invalid")
-    recorded_spent = round(
-        sum(
-            float(run.get("duration_seconds", -1))
-            for run in ledger["runs"]
-            if isinstance(run, dict)
-        ),
-        6,
-    )
     if len(ledger["runs"]) != sum(isinstance(run, dict) for run in ledger["runs"]):
         raise CriticError("dynamic command ledger contains a non-object run")
+    run_durations = [run.get("duration_seconds") for run in ledger["runs"]]
+    if any(
+        not _is_finite_number(duration)
+        or duration < 0
+        for duration in run_durations
+    ):
+        raise CriticError("dynamic command ledger run durations are invalid")
+    recorded_total = sum(float(duration) for duration in run_durations)
+    if not math.isfinite(recorded_total):
+        raise CriticError("dynamic command ledger run durations are invalid")
+    recorded_spent = round(recorded_total, 6)
     if abs(float(spent) - recorded_spent) > 0.000001:
         raise CriticError("dynamic command ledger duration disagrees with its runs")
     if manifest["commands"] != ledger["runs"]:
@@ -3529,15 +3917,25 @@ def command_finalize(args: argparse.Namespace) -> int:
         if path.stat().st_size > LOG_LIMIT_BYTES:
             raise CriticError("input project log exceeds the 5 MiB limit", kind="resource_limited")
 
-    report = redact_text(report_path.read_text(encoding="utf-8"))
+    inherited_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    managed_proxy_endpoint = _managed_loopback_proxy_endpoint(inherited_proxy)
+    report = _redact_managed_proxy_details(
+        report_path.read_text(encoding="utf-8"), inherited_proxy, managed_proxy_endpoint
+    )
     review = _sanitize_json_strings(
-        read_json_bounded(review_path, PRIMARY_ARTIFACT_LIMIT_BYTES, "review JSON")
+        read_json_bounded(review_path, PRIMARY_ARTIFACT_LIMIT_BYTES, "review JSON"),
+        inherited_proxy,
+        managed_proxy_endpoint,
     )
     coverage = _sanitize_json_strings(
-        read_json_bounded(coverage_path, PRIMARY_ARTIFACT_LIMIT_BYTES, "coverage JSON")
+        read_json_bounded(coverage_path, PRIMARY_ARTIFACT_LIMIT_BYTES, "coverage JSON"),
+        inherited_proxy,
+        managed_proxy_endpoint,
     )
     manifest = _sanitize_json_strings(
-        read_json_bounded(manifest_path, PRIMARY_ARTIFACT_LIMIT_BYTES, "run manifest")
+        read_json_bounded(manifest_path, PRIMARY_ARTIFACT_LIMIT_BYTES, "run manifest"),
+        inherited_proxy,
+        managed_proxy_endpoint,
     )
     validate_repository_review(review, prepare)
     validate_coverage_summary(coverage)
@@ -3572,7 +3970,11 @@ def command_finalize(args: argparse.Namespace) -> int:
     combined_log = ""
     log_truncated = False
     for path in log_paths:
-        section = redact_text(path.read_text(encoding="utf-8", errors="replace"))
+        section = _redact_managed_proxy_details(
+            path.read_text(encoding="utf-8", errors="replace"),
+            inherited_proxy,
+            managed_proxy_endpoint,
+        )
         encoded = (combined_log + section + "\n").encode("utf-8")
         if len(encoded) > LOG_LIMIT_BYTES:
             combined_log = encoded[:LOG_LIMIT_BYTES].decode("utf-8", "ignore") + "\n[LOG TRUNCATED]\n"

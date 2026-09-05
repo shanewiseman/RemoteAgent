@@ -86,7 +86,7 @@ filesystem access is rejected, approval is fixed to `never`, and only
 `read-only`/`workspace-write` modes are accepted. It also disables config-
 defined MCP servers, user hooks, plugins/apps, and browser/computer integrations
 because those processes do not share the local command sandbox. The bundled
-local code-mode host is enabled as a narrow exception: Codex 0.149.1 model
+local code-mode host is enabled as a narrow exception: Codex 0.153.2 model
 metadata can select code-mode tools even while the optional `code_mode` feature
 is false, and disabling the host makes those selected tools fail closed. The
 host evaluates orchestration JavaScript in sandbox-enabled V8 with imports and
@@ -108,17 +108,19 @@ network access only to the exact hostnames `example.com`, `pypi.org`,
 non-loopback proxy exposure, and arbitrary Unix sockets. The repository critic
 is the only checked-in opt-in; the template and joke agent remain offline.
 
-For Codex 0.149.1, the root requirements enable the `network_proxy` feature and
-provide constraints but intentionally omit `experimental_network.enabled`:
-managed `enabled=true` would grant the allowlist regardless of the agent
-revision, while `enabled=false` would deny even an opted-in critic. The router
-therefore repeats the validated immutable revision Boolean on every `codex exec`
-invocation, forcing `false` unless both the revision and effective sandbox are
-`workspace-write` with networking enabled. Proxy runtime state uses
+For Codex 0.153.2, the root requirements enable the `network_proxy` feature and
+provide constraints but intentionally omit `experimental_network.enabled`.
+Although the published activation model says sandbox networking remains the
+access gate, the built-image app-server probe observes that managed
+`enabled=true` exposes an allowlisted host even when the command policy says
+`network_access=false`. The router therefore repeats the validated immutable
+revision Boolean on every `codex exec` invocation, forcing `false` unless both
+the revision and effective sandbox are `workspace-write` with networking
+enabled. Proxy runtime state uses
 `XDG_RUNTIME_DIR=/tmp/remoteagent-codex-runtime`, created mode 0700 inside the
 existing per-container `/tmp` tmpfs; no new mount is introduced.
 
-This is a hostname policy, not an HTTPS-only firewall. Codex 0.149.1 does not
+This is a hostname policy, not an HTTPS-only firewall. Codex 0.153.2 does not
 let the deployment restrict scheme, port, HTTP method/body, calling process,
 lockfile state, lifecycle scripts, or transfer size through this table. The
 critic configures package managers for credential-free HTTPS and validates

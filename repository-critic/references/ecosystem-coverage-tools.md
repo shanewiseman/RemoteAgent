@@ -4,6 +4,12 @@ The image manifest at `/opt/remoteagent/agent/toolchain-manifest.json` is the
 source of truth for installed versions. Always validate dependency references,
 use `restore-plan`, and execute each returned argv with `run`. These examples
 explain the adapter; they are not permission to run an undocumented shell.
+The current bounded runner emits nullable `managed_proxy_state` on every command;
+schema-v1 validation accepts older records that omit it but permits no other
+extra command keys. Only a failed loopback-listener probe can establish
+`unavailable`; captured repository or package-manager text cannot. Finalization
+recursively strips the inherited proxy address, port, and environment value from
+all published text, JSON strings, logs, and the matching command ledger.
 
 ## Python 3.12
 
@@ -17,6 +23,20 @@ requirements file with hashes. Use no-root/project install and binary-only/no-
 build settings where the manager supports them. An unlocked `pyproject.toml` or
 requirements input may be resolved only in scratch; retain the generated lock,
 `pip freeze --all`, source manifest hash, and available index integrity hashes.
+When `pyproject.toml` declares a non-empty
+`[project.optional-dependencies].test`, the uv or Poetry restore selects exactly
+that extra from the committed or scratch-generated lock. An empty `test=[]` is
+absent, and other optional extras are not implicit test dependencies. A separate
+hashed `requirements.txt` or Pipenv input cannot prove the combined
+runtime-plus-extra solution, so these mixed-input cases are blocked until the
+repository supplies one unified lock. Dependency-free projects still receive an
+empty isolated venv for documented stdlib tests. Bare `pytest`, `py.test`, or
+`coverage` must exist in that venv and never fall through to image-global tools.
+
+No-root installs for conventional `src/` layouts remain importable during Python
+test, coverage, and static phases by setting `PYTHONPATH` to the validated,
+non-symlinked project `src/` directory. Inherited `PYTHONHOME` and `PYTHONPATH`
+are removed; no other path is appended.
 
 Prefer a documented coverage command. For an ordinary pytest repository, the
 generic form is conceptually:

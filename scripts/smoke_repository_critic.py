@@ -727,7 +727,14 @@ def validate_snapshot_review(
         serialized = json.dumps(row, sort_keys=True)
         semantic_text = serialized.lower()
         if (
-            "authorize_sensitive_operation" in semantic_text
+            any(
+                term in semantic_text
+                for term in (
+                    "authorize_sensitive_operation",
+                    "authorization",
+                    "authorized",
+                )
+            )
             and "fixture-admin" in semantic_text
             and "empty" in semantic_text
             and any(

@@ -10,11 +10,12 @@ allow_managed_hooks_only = true
 allow_appshots = false
 allow_remote_control = false
 
-# Constraints for the managed proxy. Deliberately omit `enabled`: Codex 0.149.1
-# interprets a managed `enabled = true` as an unconditional network grant. The
-# feature flag below loads the proxy implementation; the router repeats each
-# validated revision's sandbox_workspace_write.network_access Boolean as an
-# explicit per-run override so the immutable revision remains authoritative.
+# Constraints for the managed proxy. Deliberately omit `enabled`: the Codex
+# 0.153.2 built-image probe observes that managed `enabled = true` exposes the
+# allowlisted proxy even when sandbox_workspace_write.network_access is false.
+# The feature flag below loads the proxy implementation; the router repeats each
+# validated revision Boolean as an explicit per-run override so the immutable
+# revision remains authoritative and default agents remain offline.
 [experimental_network]
 domains = { "example.com" = "allow", "pypi.org" = "allow", "files.pythonhosted.org" = "allow", "registry.npmjs.org" = "allow", "proxy.golang.org" = "allow", "sum.golang.org" = "allow" }
 managed_allowed_domains_only = true
@@ -30,7 +31,7 @@ dangerously_allow_all_unix_sockets = false
 # These integrations can launch host-side processes or read files outside the
 # command sandbox. RemoteAgent V1 deliberately exposes only sandboxed local
 # tools plus Codex-owned model/web traffic. The one explicit exception is
-# Codex's bundled local code-mode host: Codex 0.149.1 model metadata can select
+# Codex's bundled local code-mode host: Codex 0.153.2 model metadata can select
 # code-mode tools even while the user-selectable `code_mode` feature is false,
 # and those tools fail closed if their local V8 host is disabled. Nested OS
 # tool calls still return to Codex for the normal managed sandbox policy.

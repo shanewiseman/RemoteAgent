@@ -138,6 +138,43 @@ def test_snapshot_review_requires_state_framing_traceability_and_architecture() 
         smoke.validate_snapshot_review("Diff review of the repository.", review)
 
 
+def test_snapshot_review_accepts_semantic_authorization_traceability() -> None:
+    smoke = _load_smoke()
+    review = {
+        "summary": {"verdict": "The current repository state contradicts its contract."},
+        "traceability": [
+            {
+                "claim": (
+                    "Only the exact token fixture-admin is authorized; every other "
+                    "token, including empty, is denied."
+                ),
+                "status": "contradicted",
+                "documentation_evidence": ["README.md:8-10"],
+                "implementation_evidence": ["review_target/access.py:11-16"],
+                "test_evidence": ["tests/test_access.py:8-10"],
+            }
+        ],
+        "findings": [
+            {
+                "priority": "P1",
+                "title": "Non-admin tokens are authorized",
+                "description": "The implementation returns true and allows non-admin tokens.",
+                "evidence": [{"path": "review_target/access.py"}],
+            },
+            {
+                "priority": "P2",
+                "title": "Policy-module boundary is absent",
+                "description": (
+                    "ARCHITECTURE.md requires review_target/policy.py, but policy remains "
+                    "in review_target/access.py"
+                ),
+            },
+        ],
+    }
+
+    assert len(smoke.validate_snapshot_review("Current-state assessment.", review)) == 1
+
+
 def test_high_priority_gap_accepts_semantic_authorization_evidence() -> None:
     smoke = _load_smoke()
 

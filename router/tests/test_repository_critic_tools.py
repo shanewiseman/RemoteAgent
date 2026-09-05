@@ -16,6 +16,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CRITIC_TOOL = REPOSITORY_ROOT / "repository-critic" / "tools" / "repository_critic.py"
 TOOLCHAIN_MANIFEST = REPOSITORY_ROOT / "repository-critic" / "toolchain-manifest.json"
 HASH = "a" * 64
+PYTHON_VENV_RESET = ["python3.12", "-I", "-m", "venv", "--clear", ".venv"]
 ARTIFACT_NAMES = {
     "coverage-details.tar.gz",
     "coverage-summary.json",
@@ -221,6 +222,8 @@ def _finalize(
     record_path: Path,
     record: dict[str, Any],
     drafts: dict[str, Path],
+    *,
+    environment: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     return _invoke(
         "finalize",
@@ -244,6 +247,7 @@ def _finalize(
         drafts["log"],
         "--coverage-dir",
         drafts["coverage_dir"],
+        environment=environment,
     )
 
 
@@ -472,7 +476,7 @@ def test_python_restore_plans_distinguish_hashed_lock_and_unlocked_resolution(
     assert locked_plan["mode"] == "locked"
     assert locked_plan["manager"] == "pip"
     assert locked_plan["lockfile"] == "requirements.txt"
-    assert locked_plan["commands"][0] == ["python3.12", "-m", "venv", ".venv"]
+    assert locked_plan["commands"][0] == PYTHON_VENV_RESET
     assert "--require-hashes" in locked_plan["commands"][1]
     assert "--only-binary=:all:" in locked_plan["commands"][1]
 
@@ -486,9 +490,104 @@ def test_python_restore_plans_distinguish_hashed_lock_and_unlocked_resolution(
     assert unlocked_process.returncode == 0, unlocked_process.stderr
     assert unlocked_plan["mode"] == "resolved_unlocked"
     assert "generated in scratch" in unlocked_plan["lockfile"]
-    assert unlocked_plan["commands"][0][:3] == ["uv", "pip", "compile"]
-    assert "--generate-hashes" in unlocked_plan["commands"][0]
+    assert unlocked_plan["commands"][0] == PYTHON_VENV_RESET
+    assert unlocked_plan["commands"][1][:3] == ["uv", "pip", "compile"]
+    assert "--generate-hashes" in unlocked_plan["commands"][1]
     assert unlocked_plan["commands"][-1][:3] == ["uv", "pip", "freeze"]
+
+
+def test_python_restore_selects_only_declared_test_extra_and_handles_mixed_authorities(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _write_files(
+        project,
+        {
+            "pyproject.toml": (
+                "[project]\nname='fixture'\nversion='1'\n"
+                "[project.optional-dependencies]\n"
+                "docs=['sphinx==9.0.0']\ntest=['pytest==8.4.2']\n"
+            )
+        },
+    )
+
+    process, plan = _restore_plan(project, "python", unlocked=True)
+
+    assert process.returncode == 0, process.stderr
+    assert plan["commands"][0] == PYTHON_VENV_RESET
+    sync = plan["commands"][2]
+    assert sync == [
+        "uv",
+        "sync",
+        "--locked",
+        "--no-install-project",
+        "--extra",
+        "test",
+        "--no-build",
+    ]
+    assert "docs" not in sync
+
+    undeclared = tmp_path / "undeclared"
+    _write_files(
+        undeclared,
+        {
+            "tests/test_example.py": (
+                "import unittest\n\nclass Example(unittest.TestCase):\n"
+                "    def test_example(self):\n        self.assertTrue(True)\n"
+            )
+        },
+    )
+    stdlib_process, stdlib_plan = _restore_plan(undeclared, "python")
+    assert stdlib_process.returncode == 0, stdlib_process.stderr
+    assert stdlib_plan["manager"] == "python-venv"
+
+    mixed = tmp_path / "mixed-lock-authorities"
+    _write_files(
+        mixed,
+        {
+            "pyproject.toml": (
+                "[project]\nname='fixture'\nversion='1'\n"
+                "[project.optional-dependencies]\ntest=['pytest==8.4.2']\n"
+            ),
+            "requirements.txt": f"runtime==1.0.0 --hash=sha256:{HASH}\n",
+        },
+    )
+    mixed_process, mixed_error = _restore_plan(mixed, "python", unlocked=True)
+    assert mixed_process.returncode == 2
+    assert mixed_error["kind"] == "blocked_dependency_restore"
+    assert "unified lock" in mixed_error["message"]
+
+    pipenv_mixed = tmp_path / "pipenv-mixed-authorities"
+    _write_files(
+        pipenv_mixed,
+        {
+            "pyproject.toml": (
+                "[project]\nname='fixture'\nversion='1'\n"
+                "[project.optional-dependencies]\ntest=['pytest==8.4.2']\n"
+            ),
+            "Pipfile.lock": "{}\n",
+        },
+    )
+    pipenv_process, pipenv_error = _restore_plan(pipenv_mixed, "python", unlocked=True)
+    assert pipenv_process.returncode == 2
+    assert pipenv_error["kind"] == "blocked_dependency_restore"
+    assert "unified dependency lock" in pipenv_error["message"]
+
+    empty_extra = tmp_path / "empty-test-extra"
+    _write_files(
+        empty_extra,
+        {
+            "pyproject.toml": (
+                "[project]\nname='fixture'\nversion='1'\n"
+                "[project.optional-dependencies]\ntest=[]\n"
+            ),
+            "requirements.txt": f"runtime==1.0.0 --hash=sha256:{HASH}\n",
+        },
+    )
+    empty_process, empty_plan = _restore_plan(empty_extra, "python")
+    assert empty_process.returncode == 0, empty_process.stderr
+    assert empty_plan["manager"] == "pip"
+    assert empty_plan["mode"] == "locked"
 
 
 @pytest.mark.parametrize(
@@ -499,8 +598,12 @@ def test_python_restore_plans_distinguish_hashed_lock_and_unlocked_resolution(
             "pyproject.toml",
             "[project]\nname = 'fixture'\nversion = '1.0.0'\n",
             "uv.lock",
-            [["uv", "sync", "--locked", "--no-install-project", "--no-build"]],
             [
+                PYTHON_VENV_RESET,
+                ["uv", "sync", "--locked", "--no-install-project", "--no-build"],
+            ],
+            [
+                PYTHON_VENV_RESET,
                 ["uv", "lock", "--no-build"],
                 ["uv", "sync", "--locked", "--no-install-project", "--no-build"],
                 ["uv", "pip", "freeze"],
@@ -511,8 +614,12 @@ def test_python_restore_plans_distinguish_hashed_lock_and_unlocked_resolution(
             "pyproject.toml",
             "[tool.poetry]\nname = 'fixture'\nversion = '1.0.0'\n",
             "poetry.lock",
-            [["poetry", "install", "--no-root", "--no-interaction", "--no-ansi"]],
             [
+                PYTHON_VENV_RESET,
+                ["poetry", "install", "--no-root", "--no-interaction", "--no-ansi"],
+            ],
+            [
+                PYTHON_VENV_RESET,
                 ["poetry", "lock"],
                 ["poetry", "install", "--no-root", "--no-interaction", "--no-ansi"],
                 ["poetry", "show", "--tree"],
@@ -523,8 +630,13 @@ def test_python_restore_plans_distinguish_hashed_lock_and_unlocked_resolution(
             "Pipfile",
             "[packages]\nsix = '==1.17.0'\n",
             "Pipfile.lock",
-            [["pipenv", "sync", "--dev"], ["pipenv", "requirements", "--dev"]],
             [
+                PYTHON_VENV_RESET,
+                ["pipenv", "sync", "--dev"],
+                ["pipenv", "requirements", "--dev"],
+            ],
+            [
+                PYTHON_VENV_RESET,
                 ["pipenv", "lock"],
                 ["pipenv", "sync", "--dev"],
                 ["pipenv", "requirements", "--dev"],
@@ -781,6 +893,7 @@ def test_run_uses_sanitized_deterministic_environment_and_hook_policy(
     assert process.returncode == 0, process.stderr
     assert record["status"] == "success"
     assert record["build_hooks_enabled"] is hooks
+    assert record["managed_proxy_state"] is None
     log = log_path.read_text(encoding="utf-8")
     assert '"TEST_API_TOKEN": null' in log
     assert '"HTTP_PROXY": null' in log
@@ -877,6 +990,7 @@ def test_run_enforces_timeout_disk_and_total_budget(tmp_path: Path) -> None:
     )
     assert budget_process.returncode == 75
     assert budget["status"] == "resource_limited"
+    assert budget["managed_proxy_state"] is None
     assert "budget exhausted" in budget["limit_reason"]
 
 
@@ -1417,6 +1531,161 @@ def test_finalize_rejects_invalid_schema_before_cleanup_or_publication(tmp_path:
     assert "coverage summary" in error["message"]
     assert Path(record["scratch_root"]).is_dir()
     assert list(Path(record["artifact_root"]).iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("tamper", "expected_error"),
+    [
+        ("extra_key", "only supported fields"),
+        ("signal_object", "signal must be text or null"),
+        ("limit_reason_object", "limit_reason must be text or null"),
+        ("nan_duration", "duration is invalid"),
+        ("non_restore_state", "non-restore"),
+        ("unavailable_success", "inconsistent failure evidence"),
+        ("reason_without_state", "requires unavailable state"),
+    ],
+)
+def test_finalize_rejects_command_proxy_schema_and_invariant_tampering(
+    tmp_path: Path, tamper: str, expected_error: str
+) -> None:
+    workspace, record_path, prepare = _prepare_workspace(tmp_path)
+    scratch = Path(prepare["scratch_root"])
+    drafts = _valid_finalizer_drafts(prepare)
+    process, command, _log = _run_command(
+        scratch,
+        "pass",
+        identifier="restore-record",
+        phase="restore",
+        environment={"HTTPS_PROXY": "https://proxy.invalid"},
+    )
+    assert process.returncode == 0, process.stderr
+
+    if tamper == "extra_key":
+        command["proxy_url"] = "forbidden"
+    elif tamper == "signal_object":
+        command["signal"] = {
+            "managed_proxy_url": {"host_octets": [127, 0, 0, 1], "port": 49181}
+        }
+    elif tamper == "limit_reason_object":
+        command["limit_reason"] = {
+            "managed_proxy_url": {"host_octets": [127, 0, 0, 1], "port": 49181}
+        }
+    elif tamper == "nan_duration":
+        command["duration_seconds"] = float("nan")
+    elif tamper == "non_restore_state":
+        command.update(
+            {"phase": "test", "restore_mode": None, "managed_proxy_state": "available"}
+        )
+    elif tamper == "unavailable_success":
+        command.update(
+            {
+                "managed_proxy_state": "unavailable",
+                "status": "success",
+                "limit_reason": "managed_proxy_unavailable",
+            }
+        )
+    else:
+        command.update(
+            {
+                "managed_proxy_state": None,
+                "status": "failed",
+                "exit_code": 1,
+                "limit_reason": "managed_proxy_unavailable",
+            }
+        )
+
+    _write_json(
+        scratch / ".critic-budget.json",
+        {
+            "schema_version": 1,
+            "spent_seconds": command["duration_seconds"],
+            "runs": [command],
+        },
+    )
+    manifest = json.loads(drafts["manifest"].read_text(encoding="utf-8"))
+    manifest["commands"] = [command]
+    _write_json(drafts["manifest"], manifest)
+    if command["phase"] == "test":
+        review = json.loads(drafts["review"].read_text(encoding="utf-8"))
+        review["dynamic_analysis"]["test_run_count"] = 1
+        _write_json(drafts["review"], review)
+
+    finalize_process, error = _finalize(workspace, record_path, prepare, drafts)
+
+    assert finalize_process.returncode == 2
+    assert expected_error in error["message"]
+    assert scratch.is_dir()
+    assert list(Path(prepare["artifact_root"]).iterdir()) == []
+
+
+def test_finalize_redacts_managed_proxy_from_all_text_and_sanitizes_ledger(
+    tmp_path: Path,
+) -> None:
+    workspace, record_path, prepare = _prepare_workspace(tmp_path)
+    scratch = Path(prepare["scratch_root"])
+    drafts = _valid_finalizer_drafts(prepare)
+    process, command, _log = _run_command(scratch, "pass", identifier="command-record")
+    assert process.returncode == 0, process.stderr
+    proxy_url = "http://127.0.0.1:49181"
+    endpoint = "127.0.0.1:49181"
+    equivalent_urls = [
+        "http://localhost:049181",
+        "https://127.0.0.2:00049181/diagnostic",
+        "http://[0:0:0:0:0:0:0:1]:049181",
+    ]
+    command["argv"].extend([proxy_url, endpoint, *equivalent_urls])
+    _write_json(
+        scratch / ".critic-budget.json",
+        {
+            "schema_version": 1,
+            "spent_seconds": command["duration_seconds"],
+            "runs": [command],
+        },
+    )
+
+    manifest = json.loads(drafts["manifest"].read_text(encoding="utf-8"))
+    manifest["commands"] = [command]
+    manifest["limitations"].append(f"proxy diagnostic {proxy_url} {equivalent_urls[0]}")
+    _write_json(drafts["manifest"], manifest)
+    review = json.loads(drafts["review"].read_text(encoding="utf-8"))
+    review["dynamic_analysis"]["test_run_count"] = 1
+    review["limitations"].append(f"proxy diagnostic {endpoint} {equivalent_urls[1]}")
+    _write_json(drafts["review"], review)
+    coverage = json.loads(drafts["coverage"].read_text(encoding="utf-8"))
+    coverage["high_priority_gaps"].append(
+        f"proxy diagnostic {proxy_url} {equivalent_urls[2]}"
+    )
+    _write_json(drafts["coverage"], coverage)
+    drafts["report"].write_text(
+        f"# Review\n\nProxy: {proxy_url} {equivalent_urls[0]}\n", encoding="utf-8"
+    )
+    drafts["log"].write_text(
+        f"Proxy: {endpoint} {equivalent_urls[1]} {equivalent_urls[2]}\n",
+        encoding="utf-8",
+    )
+
+    finalize_process, result = _finalize(
+        workspace,
+        record_path,
+        prepare,
+        drafts,
+        environment={"HTTPS_PROXY": proxy_url},
+    )
+
+    assert finalize_process.returncode == 0, finalize_process.stderr
+    artifact_root = Path(result["artifact_root"])
+    for name in ARTIFACT_NAMES - {"coverage-details.tar.gz"}:
+        text = (artifact_root / name).read_text(encoding="utf-8")
+        assert proxy_url not in text
+        assert endpoint not in text
+        assert "49181" not in text
+        assert "049181" not in text
+        assert "00049181" not in text
+        assert not any(url in text for url in equivalent_urls)
+    published_manifest = json.loads(
+        (artifact_root / "run-manifest.json").read_text(encoding="utf-8")
+    )
+    assert "[REDACTED MANAGED PROXY]" in published_manifest["commands"][0]["argv"]
 
 
 def test_finalize_rejects_oversized_primary_artifact_before_cleanup(tmp_path: Path) -> None:

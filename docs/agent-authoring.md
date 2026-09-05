@@ -91,11 +91,15 @@ HTTP method.
 
 The router repeats this validated revision Boolean as an explicit per-run Codex
 CLI override (`true` only for an effective `workspace-write` turn, `false` for
-every other turn). This works around the pinned Codex 0.149.1
-[static nested-config bug](https://github.com/openai/codex/issues/40339). The
-root-owned policy enables the proxy feature and fixes its destinations and
-guards, but deliberately omits the managed `experimental_network.enabled` key
-because that version interprets `enabled=true` as an unconditional grant.
+every other turn). This preserves the workaround for the
+[static nested-config bug reported against Codex 0.149.1](https://github.com/openai/codex/issues/40339)
+and makes revision enforcement independent of static config materialization.
+The root-owned policy enables the proxy feature and fixes its destinations and
+guards, but deliberately omits `experimental_network.enabled`. Although the
+published activation model says sandbox networking remains the access gate, the
+0.153.2 built-image probe observes that managed `enabled=true` exposes an
+allowlisted host even when the command policy says `network_access=false`.
+Omission plus the explicit per-run Boolean preserves default-off behavior.
 
 Top-level `model` and `model_reasoning_effort` values are defaults for new
 RemoteAgent conversations. A caller may override them with the `model` and
