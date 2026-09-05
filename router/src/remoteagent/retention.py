@@ -4,7 +4,6 @@ import asyncio
 import logging
 import shutil
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from sqlalchemy import and_, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -40,6 +39,12 @@ class RetentionWorker:
     async def start(self) -> None:
         if self._task is None:
             self._stopping.clear()
+            try:
+                await self.artifact_service.reconcile_orphans(
+                    grace_seconds=self.settings.artifact_orphan_grace_seconds
+                )
+            except Exception:  # noqa: BLE001 - the scheduled pass will retry.
+                logger.warning("startup artifact reconciliation failed; it will be retried")
             self._task = asyncio.create_task(self._loop(), name="retention")
 
     async def stop(self) -> None:
@@ -50,6 +55,12 @@ class RetentionWorker:
             self._task = None
 
     async def run_once(self) -> dict[str, int]:
+        try:
+            await self.artifact_service.reconcile_orphans(
+                grace_seconds=self.settings.artifact_orphan_grace_seconds
+            )
+        except Exception:  # noqa: BLE001 - durable retention must still make progress.
+            logger.warning("artifact reconciliation failed; it will be retried")
         now = datetime.now(UTC)
         artifact_cutoff = now - timedelta(seconds=self.settings.artifact_retention_seconds)
         job_cutoff = now - timedelta(seconds=self.settings.job_retention_seconds)
@@ -57,7 +68,7 @@ class RetentionWorker:
         removed_artifacts = 0
         removed_jobs = 0
         removed_conversations = 0
-        artifact_paths: list[Path] = []
+        artifact_paths: list[tuple[str, str]] = []
         old_job_ids: list[str] = []
         conversation_keys: list[str] = []
 
@@ -68,28 +79,22 @@ class RetentionWorker:
                 )
             ).all()
             for artifact in artifacts:
-                path = Path(artifact.storage_path).resolve()
-                try:
-                    path.relative_to(self.artifact_service.store_root)
-                except ValueError:
+                canonical = self.artifact_service.canonical_storage_path(
+                    job_id=artifact.job_id,
+                    relative_path=artifact.relative_path,
+                    storage_path=artifact.storage_path,
+                )
+                if canonical is None:
                     continue
-                artifact_paths.append(path)
+                artifact_paths.append((artifact.job_id, canonical[1]))
                 await session.delete(artifact)
                 removed_artifacts += 1
+            if artifact_paths:
+                # Flush explicit artifact deletions before bulk-deleting an old
+                # parent job. Otherwise the database cascade can remove the
+                # same rows first and leave the ORM reporting a stale delete.
+                await session.flush()
 
-            terminal = [status.value for status in JobStatus if status.terminal]
-            old_job_ids = (
-                await session.scalars(
-                    select(JobRecord.id).where(
-                        JobRecord.status.in_(terminal),
-                        JobRecord.completed_at.is_not(None),
-                        JobRecord.completed_at < job_cutoff,
-                    )
-                )
-            ).all()
-            if old_job_ids:
-                await session.execute(delete(JobRecord).where(JobRecord.id.in_(old_job_ids)))
-                removed_jobs = len(old_job_ids)
             active_values = [status.value for status in JobStatus if not status.terminal]
             conversation_keys = list(
                 await session.scalars(
@@ -107,17 +112,46 @@ class RetentionWorker:
                     )
                 )
             )
+            terminal = [status.value for status in JobStatus if status.terminal]
+            old_jobs = select(JobRecord.id).where(
+                JobRecord.status.in_(terminal),
+                JobRecord.completed_at.is_not(None),
+                JobRecord.completed_at < job_cutoff,
+            )
+            if conversation_keys:
+                # Keep these job rows until conversation filesystem cleanup
+                # succeeds; deleting them now would lose the retry inventory and
+                # allow the conversation tombstone to disappear prematurely.
+                old_jobs = old_jobs.where(
+                    JobRecord.conversation_key.not_in(conversation_keys)
+                )
+            old_job_ids = (await session.scalars(old_jobs)).all()
+            if old_job_ids:
+                await session.execute(delete(JobRecord).where(JobRecord.id.in_(old_job_ids)))
+                removed_jobs = len(old_job_ids)
 
         # External filesystem effects happen only after their corresponding DB
         # intent commits. Failures therefore cannot roll back durable state or
         # make another transaction observe a half-deleted conversation.
-        for path in artifact_paths:
+        for job_id, relative_path in artifact_paths:
             try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("could not remove expired artifact file %s", path)
+                await self.artifact_service.delete_artifact_file(
+                    job_id=job_id, relative_path=relative_path
+                )
+            except Exception:  # noqa: BLE001 - the reconciler retries this path.
+                logger.warning(
+                    "could not remove expired artifact file %s/%s",
+                    job_id,
+                    relative_path,
+                )
         for job_id in old_job_ids:
-            await self.artifact_service.delete_storage(job_id)
+            try:
+                await self.artifact_service.delete_storage(job_id)
+            except Exception:  # noqa: BLE001 - isolate paths and retry via reconciliation.
+                logger.warning(
+                    "could not remove retained job artifact storage; retry pending: %s",
+                    job_id,
+                )
         for conversation_key in conversation_keys:
             job_ids: list[str] = []
             async with self.session_factory() as session, session.begin():
@@ -153,17 +187,28 @@ class RetentionWorker:
 
             conversation_root = (self.settings.data_dir / "conversations").resolve()
             target = (conversation_root / conversation_key).resolve()
+            cleanup_succeeded = True
             try:
                 target.relative_to(conversation_root)
                 if target.exists():
                     shutil.rmtree(target)
-                for job_id in job_ids:
-                    await self.artifact_service.delete_storage(job_id)
             except (OSError, ValueError):
+                cleanup_succeeded = False
                 logger.warning(
-                    "conversation cleanup failed; tombstone retained for retry: %s",
+                    "conversation workspace cleanup failed; tombstone retained for retry: %s",
                     conversation_key,
                 )
+            for job_id in job_ids:
+                try:
+                    await self.artifact_service.delete_storage(job_id)
+                except Exception:  # noqa: BLE001 - isolate job paths and retry the tombstone.
+                    cleanup_succeeded = False
+                    logger.warning(
+                        "conversation artifact cleanup failed; tombstone retained for retry: %s/%s",
+                        conversation_key,
+                        job_id,
+                    )
+            if not cleanup_succeeded:
                 continue
 
             async with self.session_factory() as session, session.begin():

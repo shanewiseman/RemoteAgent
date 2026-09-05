@@ -255,6 +255,21 @@ def _runtime_state_archive(link_target: str) -> bytes:
     return output.getvalue()
 
 
+def _runtime_state_special_archive() -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        for name in ("conversations", "artifact-store"):
+            member = tarfile.TarInfo(name)
+            member.type = tarfile.DIRTYPE
+            member.mode = 0o700
+            archive.addfile(member)
+        member = tarfile.TarInfo("conversations/unsafe-fifo")
+        member.type = tarfile.FIFOTYPE
+        member.mode = 0o600
+        archive.addfile(member)
+    return output.getvalue()
+
+
 def _write_backup_bundle(destination: Path, state_archive: bytes) -> None:
     payloads = {
         "manifest": b"version=test\ncreated=2026-09-02T00:00:00Z\n",
@@ -442,6 +457,33 @@ def test_remotectl_backup_validator_allows_contained_companion_link_and_rejects_
     assert "unsafe runtime-state archive link" in unsafe_result.stderr
 
 
+def test_remotectl_backup_validator_rejects_special_runtime_member(tmp_path: Path) -> None:
+    repository_root = Path(__file__).parents[2]
+    env_file = tmp_path / "remoteagent.env"
+    env_file.write_text("", encoding="utf-8")
+    archive = tmp_path / "special-member-backup.tar.gz"
+    _write_backup_bundle(archive, _runtime_state_special_archive())
+
+    result = subprocess.run(
+        [
+            str(repository_root / "scripts" / "remotectl"),
+            "--env-file",
+            str(env_file),
+            "backup",
+            "verify",
+            str(archive),
+        ],
+        cwd=repository_root,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "unsafe runtime-state archive special member" in result.stderr
+
+
 def test_remotectl_restore_expires_ephemeral_unclaimed_companion_stages(
     tmp_path: Path,
 ) -> None:
@@ -506,10 +548,134 @@ esac
     )
     assert result.returncode == 0, result.stderr
     statements = psql_log.read_text(encoding="utf-8")
+    assert statements.count("--- psql invocation ---") == 1
     assert "to_regclass('public.companion_stages') IS NOT NULL" in statements
     assert "storage_path = NULL" in statements
     assert "claimed_at IS NULL" in statements
     assert "status IN ('queued', 'importing', 'ready')" in statements
+
+
+@pytest.mark.parametrize(
+    ("failpoints", "command_failure", "message"),
+    [
+        ("swap-artifact-store", "", "database was untouched"),
+        ("database-restore", "", "PostgreSQL transaction rolled back"),
+        (
+            "database-restore,rollback-conversations",
+            "",
+            "database restore and filesystem rollback failed",
+        ),
+        ("", "stop", "failed to stop all core services"),
+        ("", "quiescence", "core services remained running after stop"),
+        ("", "postgres-start", "prior filesystem trees restored"),
+    ],
+)
+def test_remotectl_restore_failpoints_preserve_predecessors_or_stop_services(
+    tmp_path: Path, failpoints: str, command_failure: str, message: str
+) -> None:
+    repository_root = Path(__file__).parents[2]
+    state_root = tmp_path / "state"
+    conversations = state_root / "conversations"
+    artifacts = state_root / "artifact-store"
+    conversations.mkdir(parents=True)
+    artifacts.mkdir()
+    (conversations / "prior.txt").write_text("prior conversation", encoding="utf-8")
+    (artifacts / "prior.txt").write_text("prior artifact", encoding="utf-8")
+    env_file = tmp_path / "remoteagent.env"
+    env_file.write_text(
+        f"REMOTEAGENT_STATE_ROOT={state_root}\nPOSTGRES_USER=test\nPOSTGRES_DB=test\n",
+        encoding="utf-8",
+    )
+    archive = tmp_path / "backup.tar.gz"
+    _write_backup_bundle(
+        archive,
+        _runtime_state_archive(f"../.remoteagent/companions/cc_{'a' * 32}/content"),
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        """#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\n' "$*" >> "$REMOTEAGENT_TEST_DOCKER_LOG"
+if [[ "$REMOTEAGENT_TEST_RESTORE_COMMAND_FAILURE" = stop && " $* " == *" stop cron router redis postgres "* ]]; then
+  exit 7
+fi
+if [[ "$REMOTEAGENT_TEST_RESTORE_COMMAND_FAILURE" = quiescence && " $* " == *" ps --status running --quiet cron router redis postgres "* ]]; then
+  printf 'still-running\n'
+  exit 0
+fi
+if [[ "$REMOTEAGENT_TEST_RESTORE_COMMAND_FAILURE" = postgres-start && " $* " == *" up -d --wait postgres "* ]]; then
+  exit 8
+fi
+case " $* " in
+  *" pg_restore "*)
+    cat >/dev/null
+    printf 'SELECT 1;\n'
+    ;;
+  *" psql "*)
+    cat >/dev/null
+    if [[ "$*" == *"REMOTEAGENT restore failpoint after restored SQL"* ]]; then
+      exit 9
+    fi
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    docker.chmod(0o700)
+    result = subprocess.run(
+        [
+            str(repository_root / "scripts" / "remotectl"),
+            "--env-file",
+            str(env_file),
+            "restore",
+            str(archive),
+            "--yes",
+        ],
+        cwd=repository_root,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "REMOTEAGENT_ALLOW_RESTORE_FAILPOINTS": "true",
+            "REMOTEAGENT_RESTORE_FAILPOINT": failpoints,
+            "REMOTEAGENT_TEST_DOCKER_LOG": str(docker_log),
+            "REMOTEAGENT_TEST_RESTORE_COMMAND_FAILURE": command_failure,
+        },
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+    calls = docker_log.read_text(encoding="utf-8")
+    pg_restore_calls = [line for line in calls.splitlines() if " pg_restore " in f" {line} "]
+    assert len(pg_restore_calls) == 2
+    assert all(line.startswith("run --rm --interactive --pull=never") for line in pg_restore_calls)
+    assert all("--network none" in line and "--read-only" in line for line in pg_restore_calls)
+    assert all("--entrypoint pg_restore postgres:17.6-alpine" in line for line in pg_restore_calls)
+    if failpoints == "swap-artifact-store":
+        assert " psql " not in f" {calls} "
+        assert (conversations / "prior.txt").read_text(encoding="utf-8") == "prior conversation"
+        assert (artifacts / "prior.txt").read_text(encoding="utf-8") == "prior artifact"
+    elif failpoints == "database-restore":
+        assert (conversations / "prior.txt").read_text(encoding="utf-8") == "prior conversation"
+        assert (artifacts / "prior.txt").read_text(encoding="utf-8") == "prior artifact"
+        assert "REMOTEAGENT restore failpoint after restored SQL" in calls
+        assert " psql " in f" {calls} "
+        assert "stop postgres" in calls
+    elif command_failure:
+        assert (conversations / "prior.txt").read_text(encoding="utf-8") == "prior conversation"
+        assert (artifacts / "prior.txt").read_text(encoding="utf-8") == "prior artifact"
+        if command_failure in {"stop", "quiescence", "postgres-start"}:
+            assert " psql " not in f" {calls} "
+    else:
+        assert "REMOTEAGENT restore failpoint after restored SQL" in calls
+        assert " psql " in f" {calls} "
+        assert "stop cron router redis postgres" in calls
 
 
 @pytest.mark.asyncio

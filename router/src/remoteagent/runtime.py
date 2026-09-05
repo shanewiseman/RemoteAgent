@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import tomllib
@@ -146,6 +147,12 @@ class DockerComposeRuntime:
                 state.stop_task.cancel()
                 await asyncio.gather(state.stop_task, return_exceptions=True)
                 state.stop_task = None
+            # Record cleanup provenance before Compose can create or start a
+            # dependency. Provisioning may be cancelled after Docker has
+            # applied side effects but before the command reports success; the
+            # scheduler's unconditional release and router shutdown still need
+            # the exact request required to stop those services.
+            state.last_request = request
             argv = self._compose(request) + [
                 "up",
                 "-d",
@@ -156,7 +163,6 @@ class DockerComposeRuntime:
             ]
             await self._checked_compose(argv, request, "dependency provisioning")
             state.references += 1
-            state.last_request = request
 
     async def release(self, request: RuntimeRequest) -> None:
         services = list(request.definition.dependency_services)
@@ -203,7 +209,16 @@ class DockerComposeRuntime:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _stdout, _stderr = await process.communicate()
+        try:
+            _stdout, _stderr = await process.communicate()
+        except BaseException:
+            deadline = (
+                asyncio.get_running_loop().time() + self.settings.job_cleanup_timeout_seconds
+            )
+            reaped = await self._terminate_and_reap(process, deadline=deadline)
+            if not reaped:
+                logger.error("%s cleanup exceeded the configured cleanup budget", operation)
+            raise
         if process.returncode:
             raise RuntimeExecutionError(f"{operation} failed with exit code {process.returncode}")
 
@@ -263,9 +278,10 @@ class DockerComposeRuntime:
             isinstance(workspace_write, dict) and workspace_write.get("network_access") is True
         )
         effective_network = effective_sandbox == "workspace-write" and network_enabled
-        # Codex 0.149.1 does not reliably materialize the static nested config
-        # value for `codex exec`. Repeat the already validated, immutable
-        # revision value as an explicit one-run Boolean in both directions.
+        # Codex 0.149.1 did not reliably materialize the static nested config
+        # value for `codex exec`. Continue to repeat the already validated,
+        # immutable revision value as an explicit one-run Boolean in both
+        # directions so enforcement is independent of static materialization.
         common.extend(
             [
                 "-c",
@@ -341,12 +357,16 @@ class DockerComposeRuntime:
         assert process.stdin is not None
         assert process.stdout is not None
         assert process.stderr is not None
-        process.stdin.write(request.prompt.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
 
         parser = CodexJSONLParser()
         malformed = 0
+
+        async def write_stdin() -> None:
+            try:
+                process.stdin.write(request.prompt.encode("utf-8"))
+                await process.stdin.drain()
+            finally:
+                process.stdin.close()
 
         async def read_stdout() -> None:
             nonlocal malformed
@@ -372,44 +392,70 @@ class DockerComposeRuntime:
                     del chunks[:-1_000_000]
             return bytes(chunks)
 
-        stdout_task = asyncio.create_task(read_stdout())
-        stderr_task = asyncio.create_task(read_stderr())
-        wait_task = asyncio.create_task(process.wait())
-        cancelled_by_caller = False
+        stdin_task = asyncio.create_task(write_stdin(), name=f"runtime-stdin:{request.job_id}")
+        stdout_task = asyncio.create_task(read_stdout(), name=f"runtime-stdout:{request.job_id}")
+        stderr_task = asyncio.create_task(read_stderr(), name=f"runtime-stderr:{request.job_id}")
+        wait_task = asyncio.create_task(process.wait(), name=f"runtime-wait:{request.job_id}")
+        process_cleanup_started = False
+
+        async def cleanup_process() -> None:
+            nonlocal process_cleanup_started
+            if process_cleanup_started:
+                return
+            process_cleanup_started = True
+            deadline = (
+                asyncio.get_running_loop().time() + self.settings.job_cleanup_timeout_seconds
+            )
+            reader_cleanup = asyncio.create_task(
+                self._cancel_and_gather(stdin_task, stdout_task, stderr_task),
+                name=f"runtime-io-cleanup:{request.job_id}",
+            )
+            try:
+                reaped = await self._terminate_and_reap(
+                    process, wait_task=wait_task, deadline=deadline
+                )
+                readers_stopped = await self._await_cleanup_task(
+                    reader_cleanup, deadline=deadline
+                )
+            except asyncio.CancelledError:
+                reader_cleanup.cancel()
+                reader_cleanup.add_done_callback(self._consume_background_task)
+                raise
+            if not reaped:
+                logger.error(
+                    "Codex process cleanup exceeded the configured cleanup budget for %s",
+                    request.job_id,
+                )
+            if not readers_stopped:
+                logger.error(
+                    "Codex IO cleanup exceeded the configured cleanup budget for %s",
+                    request.job_id,
+                )
+
         try:
+            # Shield the IO task so lifecycle cancellation reaches this owner
+            # immediately even if a stream implementation suppresses cancellation.
+            # The bounded cleanup path then cancels and gathers all three IO tasks.
+            await asyncio.shield(stdin_task)
             while not wait_task.done():
                 if await cancelled():
-                    cancelled_by_caller = True
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(asyncio.shield(wait_task), timeout=10)
-                    except TimeoutError:
-                        process.kill()
-                    break
+                    await cleanup_process()
+                    raise asyncio.CancelledError
                 await asyncio.sleep(0.25)
             return_code = await wait_task
-            await stdout_task
-            stderr = await stderr_task
+            # A subprocess can exit before a blocked callback or pipe reader
+            # finishes. Shield both readers so cancelling this owner is never
+            # delegated to cancellation-resistant child code. The exception
+            # path below explicitly cancels and gathers them under one bounded
+            # cleanup deadline.
+            await asyncio.shield(stdout_task)
+            stderr = await asyncio.shield(stderr_task)
         except asyncio.CancelledError:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(asyncio.shield(wait_task), timeout=10)
-                except TimeoutError:
-                    process.kill()
-                    await wait_task
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            await cleanup_process()
             await self._remove_worker_container(container_name)
             raise
         except BaseException:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(asyncio.shield(wait_task), timeout=10)
-                except TimeoutError:
-                    process.kill()
-                    await wait_task
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            await cleanup_process()
             await self._remove_worker_container(container_name)
             raise
         await self._remove_worker_container(container_name)
@@ -422,8 +468,6 @@ class DockerComposeRuntime:
             # value without making the database a secret sink.
             "stderr_bytes": len(stderr),
         }
-        if cancelled_by_caller:
-            raise asyncio.CancelledError
         if return_code:
             raise RuntimeExecutionError(
                 f"Codex exited with status {return_code}",
@@ -462,20 +506,127 @@ class DockerComposeRuntime:
     async def _remove_worker_container(self, container_name: str) -> None:
         """Remove only the stable, exact container name assigned to this job."""
 
+        process: asyncio.subprocess.Process | None = None
+        wait_task: asyncio.Task[int] | None = None
         try:
-            process = await asyncio.create_subprocess_exec(
-                self.settings.compose_binary,
-                "rm",
-                "-f",
+            async with asyncio.timeout(self.settings.job_cleanup_timeout_seconds):
+                process = await asyncio.create_subprocess_exec(
+                    self.settings.compose_binary,
+                    "rm",
+                    "-f",
+                    container_name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                wait_task = asyncio.create_task(
+                    process.wait(), name=f"worker-container-remove:{container_name}"
+                )
+                await asyncio.shield(wait_task)
+        except TimeoutError:
+            self._stop_cleanup_process(process, wait_task)
+            logger.warning(
+                "worker container removal exceeded %.1f seconds for %s",
+                self.settings.job_cleanup_timeout_seconds,
                 container_name,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
             )
-            await process.wait()
+        except asyncio.CancelledError:
+            self._stop_cleanup_process(process, wait_task)
+            raise
         except Exception:  # noqa: BLE001 - Docker may already have applied --rm.
             # Docker may already have honored Compose's --rm. Cleanup is best
             # effort here; the stable job label supports later reconciliation.
             logger.warning("could not confirm removal of worker container %s", container_name)
+
+    @staticmethod
+    def _stop_cleanup_process(
+        process: asyncio.subprocess.Process | None,
+        wait_task: asyncio.Task[int] | None,
+    ) -> None:
+        """Stop a stuck cleanup CLI while allowing its child watcher to reap it."""
+
+        if process is not None and process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+            # The configured cleanup timeout is the complete budget. Once it is
+            # exhausted there is no second grace period in which cancellation
+            # can be hidden, so force the helper process down immediately.
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+        if wait_task is not None:
+            wait_task.add_done_callback(DockerComposeRuntime._consume_background_task)
+
+    async def _terminate_and_reap(
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        deadline: float,
+        wait_task: asyncio.Task[int] | None = None,
+    ) -> bool:
+        """Terminate, then kill and reap a child within one cleanup deadline."""
+
+        if wait_task is None:
+            wait_task = asyncio.create_task(process.wait(), name="runtime-process-reap")
+        try:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
+                remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+                # Reserve part of the single budget for post-KILL reaping rather
+                # than granting TERM and KILL a fresh full timeout apiece.
+                term_budget = min(10.0, remaining / 2)
+                if term_budget:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(wait_task), timeout=term_budget)
+                    except TimeoutError:
+                        pass
+                if not wait_task.done() and process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+            if not wait_task.done():
+                remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+                if remaining:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(wait_task), timeout=remaining)
+                    except TimeoutError:
+                        pass
+            return wait_task.done()
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            raise
+        finally:
+            if not wait_task.done():
+                wait_task.add_done_callback(self._consume_background_task)
+
+    async def _await_cleanup_task(self, task: asyncio.Task[Any], *, deadline: float) -> bool:
+        if task.done():
+            self._consume_background_task(task)
+            return True
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        if remaining:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+            except TimeoutError:
+                pass
+        if task.done():
+            self._consume_background_task(task)
+            return True
+        task.cancel()
+        task.add_done_callback(self._consume_background_task)
+        return False
+
+    @staticmethod
+    async def _cancel_and_gather(*tasks: asyncio.Task[Any]) -> None:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
+    def _consume_background_task(task: asyncio.Task[Any]) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
 
 
 class FakeRuntime:

@@ -1,20 +1,34 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import mimetypes
 import os
+import re
 import shutil
 import stat
 import tempfile
+import time
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .models import ArtifactRecord
-from .schemas import ArtifactView, validate_artifact_relative_path
+from .models import ArtifactRecord, JobRecord
+from .schemas import ArtifactView, JobStatus, validate_artifact_relative_path
+
+logger = logging.getLogger(__name__)
+
+_JOB_ID_RE = re.compile(r"^j_[0-9a-f]{32}$")
+_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
 
 
 class ArtifactNotFoundError(LookupError):
@@ -221,11 +235,201 @@ class ArtifactService:
                 raise ArtifactNotFoundError(artifact_id)
             return path, _view(record)
 
-    async def delete_storage(self, job_id: str) -> None:
-        target = (self.store_root / job_id).resolve()
+    def canonical_storage_path(
+        self, *, job_id: str, relative_path: str, storage_path: str
+    ) -> tuple[Path, str] | None:
+        """Return a validated canonical record path without resolving filesystem links."""
+
+        if not _JOB_ID_RE.fullmatch(job_id):
+            return None
         try:
-            target.relative_to(self.store_root)
+            relative = validate_artifact_relative_path(relative_path)
+        except ValueError:
+            return None
+        expected = self.store_root / job_id / Path(PurePosixPath(relative))
+        if Path(storage_path) != expected:
+            return None
+        return expected, relative
+
+    async def delete_artifact_file(self, *, job_id: str, relative_path: str) -> None:
+        """Unlink one artifact through no-follow directory descriptors."""
+
+        if not _JOB_ID_RE.fullmatch(job_id):
+            raise ArtifactPolicyError("invalid artifact cleanup job id")
+        try:
+            relative = validate_artifact_relative_path(relative_path)
         except ValueError as exc:
             raise ArtifactPolicyError("invalid artifact cleanup path") from exc
-        if target.exists():
-            shutil.rmtree(target)
+        components = (job_id, *PurePosixPath(relative).parts)
+        descriptors: list[int] = []
+        try:
+            descriptor = os.open(self.store_root, _DIRECTORY_OPEN_FLAGS)
+            descriptors.append(descriptor)
+            for component in components[:-1]:
+                descriptor = os.open(component, _DIRECTORY_OPEN_FLAGS, dir_fd=descriptor)
+                descriptors.append(descriptor)
+            try:
+                os.unlink(components[-1], dir_fd=descriptor)
+            except FileNotFoundError:
+                pass
+        except FileNotFoundError:
+            pass
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+    async def delete_storage(self, job_id: str) -> None:
+        if not _JOB_ID_RE.fullmatch(job_id):
+            raise ArtifactPolicyError("invalid artifact cleanup job id")
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise ArtifactPolicyError("safe artifact directory cleanup is unavailable")
+        try:
+            root_descriptor = os.open(self.store_root, _DIRECTORY_OPEN_FLAGS)
+        except FileNotFoundError:
+            return
+        try:
+            try:
+                info = os.stat(job_id, dir_fd=root_descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if stat.S_ISDIR(info.st_mode):
+                shutil.rmtree(job_id, dir_fd=root_descriptor)
+            else:
+                # A same-name symlink or special entry is itself confined to the
+                # store. Unlink it, but never resolve or traverse its target.
+                os.unlink(job_id, dir_fd=root_descriptor)
+        finally:
+            os.close(root_descriptor)
+
+    async def reconcile_orphans(self, *, grace_seconds: int) -> int:
+        """Remove stale, untracked artifact-store entries without following links."""
+
+        cutoff = time.time() - grace_seconds
+        terminal_statuses = {status.value for status in JobStatus if status.terminal}
+        async with self.session_factory() as session:
+            job_rows = (
+                await session.execute(select(JobRecord.id, JobRecord.status))
+            ).all()
+            artifact_rows = (
+                await session.execute(
+                    select(
+                        ArtifactRecord.job_id,
+                        ArtifactRecord.relative_path,
+                        ArtifactRecord.storage_path,
+                    )
+                )
+            ).all()
+
+        # Unexpected status values fail safe: their whole job directory remains
+        # protected instead of being treated as terminal.
+        protected_jobs = {
+            job_id
+            for job_id, status_value in job_rows
+            if _JOB_ID_RE.fullmatch(job_id) and status_value not in terminal_statuses
+        }
+        durable_paths: dict[str, set[str]] = defaultdict(set)
+        for job_id, relative_path, storage_path in artifact_rows:
+            canonical = self.canonical_storage_path(
+                job_id=job_id,
+                relative_path=relative_path,
+                storage_path=storage_path,
+            )
+            if canonical is not None:
+                durable_paths[job_id].add(canonical[1])
+
+        try:
+            root_descriptor = os.open(self.store_root, _DIRECTORY_OPEN_FLAGS)
+        except FileNotFoundError:
+            return 0
+        removed = 0
+        try:
+            with os.scandir(root_descriptor) as entries:
+                for entry in entries:
+                    job_id = entry.name
+                    if not _JOB_ID_RE.fullmatch(job_id) or job_id in protected_jobs:
+                        continue
+                    try:
+                        info = os.stat(job_id, dir_fd=root_descriptor, follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode):
+                            removed += self._reconcile_directory(
+                                parent_descriptor=root_descriptor,
+                                name=job_id,
+                                relative_prefix=PurePosixPath(),
+                                durable_paths=durable_paths.get(job_id, set()),
+                                cutoff=cutoff,
+                                display_path=job_id,
+                            )
+                        elif info.st_mtime <= cutoff:
+                            os.unlink(job_id, dir_fd=root_descriptor)
+                            removed += 1
+                    except Exception:  # noqa: BLE001 - isolate each candidate path.
+                        logger.warning(
+                            "artifact orphan cleanup failed; path retained for retry: %s",
+                            job_id,
+                            exc_info=True,
+                        )
+        finally:
+            os.close(root_descriptor)
+        return removed
+
+    def _reconcile_directory(
+        self,
+        *,
+        parent_descriptor: int,
+        name: str,
+        relative_prefix: PurePosixPath,
+        durable_paths: set[str],
+        cutoff: float,
+        display_path: str,
+    ) -> int:
+        removed = 0
+        descriptor = os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_descriptor)
+        opened_info = os.fstat(descriptor)
+        directory_was_stale = opened_info.st_mtime <= cutoff
+        try:
+            with os.scandir(descriptor) as entries:
+                for entry in entries:
+                    relative = relative_prefix / entry.name
+                    relative_text = relative.as_posix()
+                    nested_display = f"{display_path}/{entry.name}"
+                    try:
+                        info = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode):
+                            removed += self._reconcile_directory(
+                                parent_descriptor=descriptor,
+                                name=entry.name,
+                                relative_prefix=relative,
+                                durable_paths=durable_paths,
+                                cutoff=cutoff,
+                                display_path=nested_display,
+                            )
+                        elif relative_text not in durable_paths and info.st_mtime <= cutoff:
+                            os.unlink(entry.name, dir_fd=descriptor)
+                            removed += 1
+                    except Exception:  # noqa: BLE001 - isolate each candidate path.
+                        logger.warning(
+                            "artifact orphan cleanup failed; path retained for retry: %s",
+                            nested_display,
+                            exc_info=True,
+                        )
+        finally:
+            os.close(descriptor)
+
+        # The directory may be removed only after every child has independently
+        # been handled. ENOTEMPTY and races are retained and retried next pass.
+        try:
+            info = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+            if (
+                stat.S_ISDIR(info.st_mode)
+                and (info.st_dev, info.st_ino) == (opened_info.st_dev, opened_info.st_ino)
+                and (directory_was_stale or removed > 0)
+            ):
+                os.rmdir(name, dir_fd=parent_descriptor)
+                removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # A non-empty directory is expected whenever it still contains a
+            # durable or young path, so avoid noisy logs for that retryable case.
+            pass
+        return removed

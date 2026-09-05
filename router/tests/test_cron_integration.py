@@ -472,12 +472,14 @@ def test_router_readiness_reports_cron_as_degraded_without_failing(tmp_path: Pat
         diagnostic = client.get("/readyz", headers={"Authorization": "Bearer router-secret"})
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ready"
+    assert response.json()["status"] == "degraded"
     assert response.json()["cron"] == {
         "status": "degraded",
         "detail": "cron service is unavailable",
+        "mandatory": False,
     }
     assert diagnostic.status_code == 200
+    assert diagnostic.json()["status"] == "degraded"
     assert diagnostic.json()["cron"] == {
         "status": "degraded",
         "database": True,
@@ -485,6 +487,7 @@ def test_router_readiness_reports_cron_as_degraded_without_failing(tmp_path: Pat
         "router_mcp": False,
         "scheduler": True,
         "detail": "router MCP is unavailable",
+        "mandatory": False,
     }
 
 

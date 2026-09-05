@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     subscription_lease_ttl_seconds: int = Field(default=21_600, ge=30)
     subscription_lease_retry_seconds: float = Field(default=1.0, gt=0)
     job_timeout_seconds: int = Field(default=14_400, ge=1)
+    job_cleanup_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
 
     compose_binary: str = "docker"
     compose_wait_timeout_seconds: int = Field(default=120, ge=1)
@@ -77,6 +78,7 @@ class Settings(BaseSettings):
     companion_git_timeout_seconds: int = Field(default=300, ge=1)
     companion_cleanup_interval_seconds: int = Field(default=300, ge=10)
     artifact_retention_seconds: int = Field(default=30 * 24 * 3600, ge=60)
+    artifact_orphan_grace_seconds: int = Field(default=3600, ge=0)
     job_retention_seconds: int = Field(default=90 * 24 * 3600, ge=60)
     conversation_retention_seconds: int = Field(default=90 * 24 * 3600, ge=60)
     retention_interval_seconds: int = Field(default=3600, ge=10)

@@ -125,6 +125,14 @@ The root service anchor applies the local `json-file` logging driver with a 10 M
 file limit and five retained files to PostgreSQL, Redis, router, and cron. Agent
 projects do not inherit this anchor.
 
+The router's Compose healthcheck remains a shallow `/healthz` liveness probe.
+Bearer-protected `/readyz` is the structured operational check: PostgreSQL and,
+when enabled, every configured scheduler worker are mandatory and return `503`
+when unavailable. Redis/cache, cron, and dashboard failures are reported as
+optional degradation with HTTP `200`; a disabled scheduler is explicitly
+non-mandatory. `remotectl doctor` validates this structure and requires the
+fully ready state.
+
 The root project is started with `postgres`, `redis`, `router`, and then `cron`. The
 `codex-auth` service is behind the `tools` profile and is used only for login,
 logout, import, and status commands.
@@ -301,7 +309,9 @@ The runner service MUST:
 - declare the workspace, sessions, artifacts, auth, and skills mounts described
   above;
 - join an agent-owned egress network shared with its declared dependencies;
-- avoid a restart policy because every turn is a one-off container;
+- avoid restart policies, replica/scale controls, and Compose lifecycle hooks;
+- avoid alternate GPU/device, CPU, swap, OOM, or storage controls that bypass
+  the platform resource bounds;
 - avoid `container_name`; the router supplies a unique job name at runtime;
 - avoid host-published ports;
 - avoid the Docker socket and all unrelated host paths; and
@@ -313,6 +323,10 @@ The runner service MUST:
 
 Manifest `[environment]` values are passed to the Docker Compose CLI as safe
 interpolation inputs. They are **not** automatically injected into the runner.
+Router registration and `remotectl` share the same filtered environment helper;
+implicit dotenv files cannot reintroduce excluded deployment credentials. Both
+validators resolve every Compose profile so hidden undeclared services are
+also rejected.
 For a value to reach a container, `compose.yaml` must explicitly reference it,
 for example:
 
@@ -357,7 +371,7 @@ requirements file.
 
 The image also pins Codex's bundled `codex-code-mode-host` executable and enables
 only that stable local host feature while leaving the optional `code_mode`
-experiment disabled. Codex 0.149.1 can receive a model profile that selects
+experiment disabled. Codex 0.153.2 can receive a model profile that selects
 code-mode tools independently of the local experiment flag; the host is needed
 to service that profile. It is a local sandbox-enabled V8 orchestration process,
 not a remote code-mode endpoint: imports and Node APIs are unavailable, and
@@ -375,14 +389,18 @@ An agent Compose project MUST NOT use:
 - writable common-skills mounts;
 - an unbounded writable root filesystem;
 - a root runner user; or
-- host-published dependency or runner ports without a reviewed platform
-  exception.
+- any host-published dependency or runner port.
 
-These isolation properties are currently review-enforced. Current automatic
-Compose validation resolves the real Compose model, verifies required service
-names, and verifies a basic dependency healthcheck, but it does not yet reject
-unsafe mounts, namespaces, privileges, ports, users, capabilities, missing
-limits, or an unexpected image.
+These isolation properties are code-enforced against Docker Compose's fully
+resolved JSON model. API registration and `scripts/remotectl validate` invoke
+the same dependency-free validator. It rejects unexpected services and
+resources; unowned networks/volumes; host binds beyond the exact five ordered
+platform mounts; runtime sockets; published ports; host namespaces; privilege,
+capability, user, root-filesystem, tmpfs, command, entrypoint, image/profile,
+label, logging, and resource-limit drift. The two runtime-added read-only
+control-file mounts shown in the job lifecycle are outside the static Compose
+model. Reviewed image contents, health-command semantics, and sidecar data
+recovery remain trusted operator responsibilities.
 
 ### Managed command networking and project restoration
 
@@ -391,17 +409,26 @@ supplies managed constraints with exact entries for `example.com`, `pypi.org`,
 `files.pythonhosted.org`, `registry.npmjs.org`, `proxy.golang.org`, and
 `sum.golang.org`, while retaining the local-address, upstream-proxy,
 non-loopback-proxy, and Unix-socket denials.
-A global `*` entry is intentionally absent because Codex 0.149.1 rejects it.
-The managed `experimental_network.enabled` key is also intentionally absent:
-Codex 0.149.1 treats `true` as unconditional and `false` as an absolute denial.
-The router repeats an explicit per-run `sandbox_workspace_write.network_access`
-Boolean to work around that version's nested static-config materialization bug.
+A global `*` entry is intentionally absent because Codex 0.153.2 rejects it.
+The managed `experimental_network.enabled` key is also intentionally absent.
+Although the published activation model says an active proxy does not grant
+command access while sandbox networking is off, the 0.153.2 built-image
+app-server probe observes allowlisted egress with managed `enabled=true` and
+`network_access=false`. The router repeats an explicit per-run
+`sandbox_workspace_write.network_access` Boolean, both to preserve default-off
+behavior with the omission and to remain compatible with the
+[nested static-config materialization bug reported against 0.149.1](https://github.com/openai/codex/issues/40339).
 It emits `true` only when an agent's immutable `config.toml` contains both
 `sandbox_mode="workspace-write"` and
 `[sandbox_workspace_write].network_access=true`. The template and joke agent do
 not opt in; the repository critic does. Codex proxy runtime state is created mode
 0700 at `/tmp/remoteagent-codex-runtime` inside the existing per-container tmpfs,
 so no writable mount is added.
+
+The 0.153.2 pin includes OpenAI's
+[Linux managed-proxy listener-handoff hardening](https://github.com/openai/codex/commit/f3741880f6dbc706252f4c5bb93f061dba18950d),
+first released in 0.151.0. It replaces filesystem-backed route sockets with
+private descriptor handoff and ties proxy bridges to the sandbox lifetime.
 
 The proxy filters destinations by exact hostname. It does not restrict scheme,
 port, method, process, payload size, or lockfile state for an admitted host. A
@@ -449,17 +476,17 @@ labels.
 | Agent ID syntax and directory identity | Code-enforced |
 | Project name exactly `remoteagent-<agent-id>` | Code-enforced |
 | Compose/config/context remain inside agent directory | Code-enforced |
-| Referenced runner and dependency services exist | Code-enforced after resolved Compose model |
-| Declared dependency has an enabled, non-empty healthcheck test | Code-enforced |
+| Resolved service set is exactly the runner and declared dependencies | Code-enforced after resolved Compose model |
+| Dependency healthcheck is enabled, non-empty, finite, and bounded by the Compose wait budget | Code-enforced |
 | Config approval `never`, file credential store, and read-only/workspace-write sandbox | Code-enforced |
 | No duplicate dependencies and runner not also a dependency | Code-enforced |
-| Healthcheck timing and semantic quality | Review-enforced |
-| Runner image/tag/profile/entrypoint | Review-enforced |
-| Required mounts and mount ordering | Review-enforced |
-| Non-root, read-only root, capabilities, security options, and limits | Review-enforced |
-| No `container_name`, host namespace, socket, arbitrary bind, or published port | Review-enforced |
-| Required Docker labels and bounded logging | Review-enforced |
-| Complete declaration of transitive operational dependencies | Review-enforced |
+| Healthcheck command semantic quality | Review-enforced |
+| Expected versioned runner image, profile, command, and entrypoint | Code-enforced |
+| Exact five static platform mounts and ordering | Code-enforced |
+| Non-root, read-only root, capabilities, security options, tmpfs, and limits | Code-enforced |
+| No `container_name`, host namespace, socket, arbitrary bind, or published port | Code-enforced |
+| Required Docker labels and bounded logging | Code-enforced |
+| No undeclared transitive operational service in the resolved model | Code-enforced |
 | Sidecar backup and restore procedure | Review-enforced |
 
 ## Dependency services
@@ -469,22 +496,31 @@ dependencies in `dependency_services`. The services are part of the agent's
 Compose project, not the root project.
 
 Every operational service, including a service otherwise reached transitively
-through Compose `depends_on`, MUST appear in `dependency_services`. Docker
-Compose may start transitive services automatically, but the current router only
-validates, reference-counts, and stops the names in the manifest. Hidden
-transitive services can otherwise remain running outside router accounting.
+through Compose `depends_on`, MUST appear in `dependency_services`. The shared
+validator rejects any extra service in the resolved model, including an
+undeclared transitive or profile-hidden dependency, so it cannot remain outside
+router accounting. The runner also cannot name an undeclared `depends_on`
+target.
 
 Each dependency MUST:
 
 - have a meaningful enabled healthcheck;
 - define finite `start_period`, interval, timeout, and retry values suitable for
   the router's overall Compose wait timeout;
-- join the same private agent network as the runner;
-- avoid a host-published port unless explicitly reviewed;
+- join only the same agent-owned egress network as the runner;
+- publish no host port;
 - define bounded CPU, memory, PID, and log-retention settings;
-- pin material image versions;
-- avoid runtime package installation; and
+- use a prebuilt image with a non-`latest` tag or full SHA-256 digest;
+- use only agent-owned named volumes, never a host bind or platform auth/skills
+  volume;
+- avoid runtime package installation and Compose build; and
 - document whether its state is ephemeral or durable.
+
+The validator enforces the structural, ownership, health-timing, image,
+resource, logging, and mount controls above. It cannot determine whether image
+contents perform runtime package installation or whether dependency state has
+an adequate recovery plan. Those questions, health-command semantics, and
+whether a version tag is sufficiently immutable remain review obligations.
 
 If durable state is stored in an agent-defined named volume, the agent owner MUST
 provide independent backup, verification, restore, retention, and upgrade
@@ -605,6 +641,17 @@ model selection uses OpenAI's documented
 preferring the dedicated `--model` flag and using `--config` for the reasoning
 setting.
 
+The four-hour default `REMOTEAGENT_JOB_TIMEOUT_SECONDS` is one absolute
+deadline computed from the durable job creation timestamp. Queueing,
+revision/workspace/companion preparation, lease wait, dependency provisioning,
+Codex execution, artifact collection, and success persistence all consume it.
+An overdue queued job becomes `expired`; an overdue claimed job becomes
+`failed`. Runtime and fenced-lease cleanup use the separate
+`REMOTEAGENT_JOB_CLEANUP_TIMEOUT_SECONDS` bound, 60 seconds by default, so
+cleanup cannot wait forever after the turn budget is exhausted. Runtime cleanup
+errors do not rewrite an existing terminal state; a lease-release failure before
+terminal commit prevents a false success.
+
 Cancellation first terminates the Compose client process, waits ten seconds, and
 kills it if necessary. The router then attempts exact-name `docker rm -f` even
 though `compose run --rm` normally removes the container. On router startup,
@@ -638,13 +685,15 @@ exact root or agent project.
 | `remotectl agent register` | No direct Docker mutation after validation | Persists immutable definition revision in PostgreSQL | Safe; queued jobs retain their submitted revision |
 | `remotectl backup create` | Quiesces cron, stops an idle router, uses `pg_dump`, archives state, restarts router then cron | Writes restricted checksum-protected archive including cron tables | Cron stops before the code-enforced router idle check |
 | `remotectl backup verify` | No daemon mutation | None | Safe while running |
-| `remotectl restore FILE --yes` | Stops cron/router/Redis, transactionally replaces the application schema, swaps state trees, then starts router before cron | Destructively replaces backed-up state including cron state | No automatic pre-restore backup; successful restore returns both services healthy |
+| `remotectl restore FILE --yes` | Prevalidates/renders the archive, stops all core services, stages complete tree replacements, restores the application schema in one transaction, and starts router before cron | Destructively replaces backed-up state including cron state | Coordinates tree/database rollback; any rollback failure leaves core stopped for manual recovery; no automatic pre-restore backup |
 | `remotectl cleanup` | Lists old exited/dead instance-labelled managed containers | Dry-run only | Does not inspect or delete data |
 | `remotectl cleanup --apply --yes` | Removes only selected terminal labelled containers | Container deletion only | Does not stop running sidecars or remove volumes/networks |
-| `remotectl doctor` | Read-only inspection plus default network-off sandbox/auth probes, local code-mode host preflight, and authenticated cron readiness | None | Safe; cron readiness proves database/schema/scoped-MCP connectivity; run the separate managed-network probe for an opted-in agent. |
+| `remotectl doctor` | Read-only inspection plus default network-off sandbox/auth probes, local code-mode host preflight, and authenticated structured router/cron readiness | None | Safe; router readiness requires PostgreSQL and every enabled scheduler worker while reporting optional degradation, and cron readiness proves database/schema/scoped-MCP connectivity. The recorded live run awaits router rebuild/restart because the unrestarted container still serves the old readiness shape. |
 | `remotectl upgrade apply --yes` | Cron quiesce, idle router stop, backup, pull/build all, recreate router then cron with health wait | New images and a pre-upgrade backup | Run idempotent `init --non-interactive` first after a 0.1 checkout switch; then clean-tree and idle checks apply |
+| `remotectl smoke postgres` | Starts a uniquely named local PostgreSQL container/volume on an ephemeral loopback port | Removes its exact disposable container and volume even after a failed check | Refuses a non-local Docker context; checks migrations, lease fencing, sequencing/claims, and cron response leases |
+| `remotectl smoke recovery --timeout 1800` | Runs real backup/verify/restore flows in a unique disposable Compose deployment | Removes its disposable project, volumes, secrets, and state | Focused CLI tests and the local live drill pass; repeat for each release qualification |
 | `remotectl smoke live` | Runs two normal asynchronous turns through the router | Deletes a successful smoke conversation unless `--keep`; failed smoke identifiers are retained | Consumes authenticated Codex capacity; disabled in CI |
-| `remotectl smoke network` | Runs pinned Codex app-server `command/exec` in disposable default and critic containers plus ephemeral TCP/Unix-socket fixtures | Removes the exact temporary service/network; no model, credential, or durable application state | Requires both built images and Docker egress; loads the managed requirements with Codex 0.149.1, then verifies default denial, critic HTTPS access to allowlisted `example.com`, one reachable unlisted-public-host denial, and loopback/private/Unix-socket denial; does not exercise the other five allowlisted hosts, alternate schemes/ports/methods, DNS rebinding, or link-local/metadata routing |
+| `remotectl smoke network` | Runs pinned Codex app-server `command/exec` in disposable default and critic containers plus ephemeral TCP/Unix-socket fixtures | Removes the exact temporary service/network; no model, credential, or durable application state | Requires both built images and Docker egress; loads the managed requirements with Codex 0.153.2, then verifies default denial, critic HTTPS access to allowlisted `example.com`, repeated cache-cold hash-locked restores through `pypi.org` and `files.pythonhosted.org`, one reachable unlisted-public-host denial, and loopback/private/Unix-socket denial. Each `command/exec` request owns a separate proxy lifetime, so this deterministic probe does not exercise unified-exec's per-environment listener handoff; the live repository-critic smoke is that end-to-end gate. It also does not exercise the other three allowlisted hosts, alternate schemes/ports/methods, DNS rebinding, or link-local/metadata routing. |
 
 Administrative mutations use a host lock when `flock` is installed. Production
 hosts MUST provide `flock`; without it, the helper cannot exclude two concurrent
@@ -705,21 +754,35 @@ is queued, provisioning, waiting for the lease, running, or collecting. It then
 stops the idle router, keeps PostgreSQL available, captures the SQL dump and
 filesystem trees, and restarts router then cron through an exit guard.
 
-Restore is destructive and requires `--yes`. It validates the exact outer
-archive members, checks SHA-256 values, validates inner archive paths, and stops
-cron, router, and Redis. It first renders the custom dump completely into its
-owner-only staging directory. One `psql --single-transaction` invocation then
-drops/recreates the application `public` schema and consumes that SQL. Objects
-absent from an older archive cannot survive, and any SQL error rolls back to the
-pre-restore schema. After complete conversation/artifact tree swaps, restore
-starts PostgreSQL/Redis/router, waits for router health and migrations, then
-starts and waits for cron.
+Restore is destructive and requires `--yes`. Before any service stop or durable
+store replacement, it validates the exact outer members and checksums, validates
+and extracts the two allowed runtime trees, rejects special archive members and
+symlink targets, and uses an isolated PostgreSQL tool container without network
+access, live volumes, or secrets to list and fully render the custom dump in an
+owner-only staging directory. It then stops cron, router, Redis, and PostgreSQL
+and verifies that every core service is stopped;
+moves the current conversation and artifact-store trees into staging; installs
+the replacements; and starts PostgreSQL alone.
 
-Database restore occurs before filesystem swaps. The operation is not atomic
-across PostgreSQL and the host filesystem. If a filesystem replacement fails
-after the database transaction, resolve the storage problem and repeat the
-verified restore before admitting work. Do not assume the filesystem rollback
-also rolled back PostgreSQL.
+One `psql --single-transaction` invocation resets and restores the application
+`public` schema and reconciles unclaimed companion stages whose ephemeral bytes
+were excluded. Objects absent from an older archive cannot survive. A tree-swap
+failure happens before database mutation and rolls the trees back. PostgreSQL
+startup failure also restores both predecessors before any SQL mutation. A SQL or
+database failure rolls back the transaction and then rolls both trees back. If
+rollback itself fails, all core services remain stopped and the retained
+staging path must be recovered manually. After both trees are live and the
+transaction commits, restore removes their predecessors, starts
+PostgreSQL/Redis/router and waits for health/migrations, then starts and waits
+for cron.
+
+This is coordinated failure recovery, not one atomic transaction spanning
+PostgreSQL and the host filesystem. The disposable recovery harness exercises
+current and pre-cron archives, continuation/content identity, newer-object
+removal, each rollback branch, and router-before-cron startup. Its focused CLI
+tests and live local smoke pass, including disposal of the generated project and
+state. Scheduled/off-host backups, a CI recovery gate, and approved RPO/RTO
+remain separate open controls.
 
 Before restoring over a working deployment, take and externally copy a verified
 backup. Confirm that no agent dependency service is still using related data;
@@ -777,6 +840,23 @@ docker ps --all \
 
 Use `scripts/remotectl cleanup` for old terminal containers. Do not infer a safe
 deletion target from a workspace directory name, and never use a global prune.
+
+### Orphaned artifact paths and retention failures
+
+At router startup and during every retention pass, the artifact reconciler
+compares the store with active jobs and durable artifact rows. It preserves
+active-job directories and every canonical durable path. Only paths beneath a
+syntactically valid job directory and older than
+`REMOTEAGENT_ARTIFACT_ORPHAN_GRACE_SECONDS` (3,600 seconds by default) are
+eligible; it uses confined no-follow deletion, so a symlink target is never
+traversed. Invalid directory names are left untouched for operator inspection.
+One path failure does not stop other cleanup and is retried on the next pass.
+
+Retention commits database intent before deleting external paths. A
+conversation selected for deletion remains a database tombstone, together with
+its job inventory, until both its workspace and every job artifact directory
+are removed. Do not manually delete the tombstone to silence a failed cleanup;
+correct the filesystem problem and let the next retention pass retry it.
 
 ### Orphaned dependency service
 
@@ -860,7 +940,8 @@ hostname filter does not constrain scheme, port, method, or payload. Prompts,
 repositories selected for execution, and agent definitions remain trusted
 inputs in V1. Before accepting hostile code, add a host/L7 egress policy,
 tailored AppArmor/seccomp profile, stronger worker isolation, and
-machine-enforced Compose policy.
+an authorization and review model beyond the enforced baseline Compose
+contract.
 
 The shared Codex auth volume is writable by the Codex parent process in every
 runner. Only reviewed agent images and base contexts may run. The common-skills
@@ -875,18 +956,15 @@ socket, PostgreSQL, Redis, or dependency ports to caller networks.
 
 | Limitation | Current consequence | Focused future requirement |
 | --- | --- | --- |
-| Compose security contract is largely review-enforced | A trusted repository author can weaken runner isolation | Validate a deny/allow policy against the fully resolved Compose model |
 | Dependency reference counts are in router memory | Forced failure can leave sidecars running | Add label-based startup discovery and reconciliation |
-| Only manifest-listed dependencies are stopped | Hidden transitive services may remain running | Resolve the complete Compose dependency graph or reject undeclared transitives |
 | Agent volumes are outside core backup | Stateful sidecars lack platform recovery | Add agent-declared backup hooks and verified restore orchestration |
 | Image-only sidecars are not pre-pulled by `build all` | First prompt may wait for a pull or fail offline | Add pull/preflight/image-digest verification |
 | Agent project name omits deployment instance | Two installations on one daemon collide | Namespace project names by immutable deployment ID with a migration path |
 | Router, PostgreSQL, and Redis have no explicit CPU/memory/PID limits | Core resource contention depends on host defaults; cron alone is bounded | Add capacity-tested limits/reservations and alerts |
-| Agent template has no bounded logging stanza | Long-lived sidecar logs may use daemon defaults | Add an agent logging anchor and validate limits |
 | Workspaces have no byte quota | One conversation can exhaust the state filesystem | Add per-conversation quotas or admission controls |
 | `router-data` is mounted but unused | Extra volume complicates inventory | Remove it or assign and document an authoritative purpose |
 | Not every Python setting is forwarded by root Compose | Some `.env` additions have no effect in-container | Maintain an explicit environment schema and forward supported settings |
-| Restore is not atomic across database and filesystem | Partial failure requires repeating restore | Add coordinated snapshots or a transactional recovery marker |
+| Restore is not one atomic database/filesystem transaction | Coordinated rollback can itself fail, in which case services remain stopped for manual recovery | Add coordinated snapshots or a transactional recovery marker |
 | Docker socket is mounted directly | Router compromise is host compromise | Introduce an allowlisted socket proxy or isolated worker API |
 
 ## Production acceptance checklist
@@ -906,10 +984,20 @@ scripts/remotectl doctor
 scripts/remotectl status
 scripts/remotectl backup create
 scripts/remotectl backup verify .runtime/backups/<created-archive>.tar.gz
+scripts/remotectl smoke postgres
+scripts/remotectl smoke recovery --timeout 1800
 scripts/remotectl smoke network
 scripts/remotectl smoke live --agent joke-agent --timeout 300
 scripts/remotectl smoke live --agent repository-critic --timeout 900
 ```
+
+The current local `smoke postgres` release-verification run proved four
+concurrent advisory-lock waiters and its exact container and volume were
+confirmed removed. The
+local recovery drill also passed its current/pre-cron, identity/hash,
+newer-object, three-failpoint, startup-order, and disposal checks. Repeat both
+commands on the reviewed local Docker daemon for future release qualification;
+neither result creates a CI, scheduled, or off-host recovery control.
 
 Before declaring the deployment production-ready, verify all of the following:
 
@@ -922,13 +1010,19 @@ Before declaring the deployment production-ready, verify all of the following:
   healthy within the configured wait timeout;
 - the inner Bubblewrap policy probe passes;
 - ChatGPT/Codex authentication is valid;
-- PostgreSQL, Redis, router, and cron are healthy;
+- PostgreSQL, Redis, router, and cron are healthy, and structured router
+  readiness reports every enabled scheduler worker live;
 - cron's authenticated readiness proves database/schema/MCP connectivity;
 - cron, PostgreSQL, and Redis have no host-published ports;
 - the router port is firewall-restricted or protected by TLS;
 - secrets and `.env` are restricted and absent from Git;
 - `.runtime`, Docker storage, logs, and dependency volumes are monitored;
 - every stateful dependency has a tested independent recovery procedure;
+- the disposable PostgreSQL smoke passes its production-backend contention and
+  fencing checks and removes its generated resources;
+- the disposable recovery smoke verifies current/pre-cron restore, content
+  identity, removal of newer objects, rollback branches, and router-before-cron
+  startup;
 - a backup archive verifies successfully and is copied to protected external
   storage; and
 - the authenticated two-turn joke-agent smoke workflow passes; and
@@ -941,4 +1035,5 @@ Before declaring the deployment production-ready, verify all of the following:
 
 After any Docker, kernel, AppArmor, base-image, Codex CLI, Compose-contract, or
 agent-dependency change, repeat validation, doctor, backup verification, and the
-live two-turn smoke workflow before reopening prompt admission.
+applicable disposable backend/recovery and live two-turn smoke workflows before
+reopening prompt admission.

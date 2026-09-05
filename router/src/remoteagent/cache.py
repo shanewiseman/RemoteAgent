@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 class Cache(Protocol):
+    backend: str
+
     async def get_json(self, key: str) -> Any | None: ...
 
     async def set_json(self, key: str, value: Any, ttl_seconds: int | None = None) -> None: ...
@@ -27,6 +29,8 @@ class Cache(Protocol):
 
 class MemoryCache:
     """Small process-local fallback. PostgreSQL remains authoritative."""
+
+    backend = "memory"
 
     def __init__(self, prefix: str = "remoteagent") -> None:
         self.prefix = prefix
@@ -93,6 +97,8 @@ class MemoryCache:
 
 
 class RedisCache:
+    backend = "redis"
+
     def __init__(self, client: Any, prefix: str = "remoteagent") -> None:
         self.client = client
         self.prefix = prefix

@@ -65,7 +65,11 @@ class CronWorker:
         )
 
     def _execution_done(self, execution_id: str, task: asyncio.Task[None]) -> None:
-        self._execution_tasks.pop(execution_id, None)
+        # A completed task may already have been replaced by a newer task for
+        # the same execution ID.  Its delayed callback must not evict the new
+        # owner from the deduplication map.
+        if self._execution_tasks.get(execution_id) is task:
+            self._execution_tasks.pop(execution_id, None)
         error = None if task.cancelled() else task.exception()
         if error is not None:
             logger.error(

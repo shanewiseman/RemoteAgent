@@ -55,6 +55,11 @@ services:
     pids_limit: 256
     mem_limit: ${REMOTEAGENT_AGENT_MEMORY_LIMIT:-2g}
     cpus: ${REMOTEAGENT_AGENT_CPU_LIMIT:-2.0}
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     labels:
       io.remoteagent.managed: "true"
       io.remoteagent.instance: ${REMOTEAGENT_INSTANCE_ID:-remoteagent}

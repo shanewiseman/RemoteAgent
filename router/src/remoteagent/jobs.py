@@ -6,8 +6,8 @@ import uuid
 import weakref
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -70,6 +70,7 @@ class JobExecution:
     prompt: str
     agent_revision: int
     thread_id: str | None
+    created_at: datetime
     model: str | None = None
     reasoning_effort: ReasoningEffort | None = None
 
@@ -109,6 +110,14 @@ TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
         JobStatus.INTERRUPTED,
     },
 }
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize timestamps returned by backends that omit UTC tzinfo."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _job_view(
@@ -298,14 +307,11 @@ class JobService:
                             await session.scalar(
                                 select(
                                     func.coalesce(
-                                        func.max(
-                                            ConversationCompanionRecord.introducing_sequence
-                                        ),
+                                        func.max(ConversationCompanionRecord.introducing_sequence),
                                         0,
                                     )
                                 ).where(
-                                    ConversationCompanionRecord.conversation_key
-                                    == conversation_key
+                                    ConversationCompanionRecord.conversation_key == conversation_key
                                 )
                             )
                             or 0
@@ -390,9 +396,11 @@ class JobService:
                 for item in records
             ]
 
-    async def claim_next(self) -> JobExecution | None:
+    async def claim_next(self, *, deadline_seconds: float | None = None) -> JobExecution | None:
         """Atomically claim the oldest turn whose conversation predecessor is done."""
 
+        expired: list[tuple[str, str]] = []
+        execution: JobExecution | None = None
         async with self.session_factory() as session, session.begin():
             candidates = (
                 await session.scalars(
@@ -403,6 +411,41 @@ class JobService:
                 )
             ).all()
             for candidate in candidates:
+                now = datetime.now(UTC)
+                if (
+                    deadline_seconds is not None
+                    and _as_utc(candidate.created_at) + timedelta(seconds=deadline_seconds) <= now
+                ):
+                    result = await session.execute(
+                        update(JobRecord)
+                        .where(
+                            JobRecord.id == candidate.id,
+                            JobRecord.status == JobStatus.QUEUED.value,
+                        )
+                        .values(
+                            status=JobStatus.EXPIRED.value,
+                            error="job exceeded the configured end-to-end deadline",
+                            completed_at=now,
+                        )
+                    )
+                    if result.rowcount:
+                        candidate.status = JobStatus.EXPIRED.value
+                        candidate.error = "job exceeded the configured end-to-end deadline"
+                        candidate.completed_at = now
+                        conversation = await session.get(
+                            ConversationRecord, candidate.conversation_key
+                        )
+                        if conversation is not None:
+                            conversation.updated_at = now
+                            conversation.agent_revision = candidate.agent_revision
+                        await self._add_event(
+                            session,
+                            candidate,
+                            "job.expired",
+                            {"error": candidate.error},
+                        )
+                        expired.append((candidate.id, candidate.conversation_key))
+                    continue
                 prior_active = await session.scalar(
                     select(func.count())
                     .select_from(JobRecord)
@@ -440,6 +483,7 @@ class JobService:
                         prompt=candidate.prompt,
                         agent_revision=candidate.agent_revision,
                         thread_id=conversation.codex_thread_id,
+                        created_at=candidate.created_at,
                         model=candidate.model,
                         reasoning_effort=(
                             ReasoningEffort(candidate.reasoning_effort)
@@ -448,8 +492,10 @@ class JobService:
                         ),
                     )
                     break
-            else:
-                return None
+        for job_id, conversation_key in expired:
+            await self._publish(job_id, conversation_key, JobStatus.EXPIRED)
+        if execution is None:
+            return None
         await self._publish(execution.id, execution.conversation_key, JobStatus.PROVISIONING)
         return execution
 
@@ -570,7 +616,12 @@ class JobService:
             conversation.status = ConversationStatus.ARCHIVED.value
             conversation.updated_at = datetime.now(UTC)
 
-    async def delete_conversation(self, conversation_key: str) -> list[str]:
+    async def delete_conversation(
+        self,
+        conversation_key: str,
+        *,
+        artifact_cleanup: Callable[[str], Awaitable[None]] | None = None,
+    ) -> list[str]:
         async with self.session_factory() as session, session.begin():
             conversation = await lock_conversation(session, conversation_key)
             if conversation is None:
@@ -596,6 +647,21 @@ class JobService:
             conversation.status = ConversationStatus.DELETED.value
             conversation.updated_at = datetime.now(UTC)
         self.workspaces.remove_conversation(conversation_key)
+        cleanup_error: Exception | None = None
+        if artifact_cleanup is not None:
+            for job_id in job_ids:
+                try:
+                    await artifact_cleanup(job_id)
+                except Exception as exc:  # noqa: BLE001 - attempt every confined job path.
+                    logger.warning(
+                        "conversation artifact cleanup failed; tombstone retained: %s/%s",
+                        conversation_key,
+                        job_id,
+                    )
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            if cleanup_error is not None:
+                raise cleanup_error
         async with self.session_factory() as session, session.begin():
             conversation = await lock_conversation(session, conversation_key)
             if conversation is not None and conversation.status == ConversationStatus.DELETED.value:

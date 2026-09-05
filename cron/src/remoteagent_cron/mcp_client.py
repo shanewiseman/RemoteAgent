@@ -101,10 +101,18 @@ class RouterMCPClient(Protocol):
 class StreamableHTTPRouterClient:
     """Small typed wrapper around the router's real Streamable HTTP MCP endpoint."""
 
-    def __init__(self, url: str, token: str, *, timeout_seconds: float = 30) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        *,
+        timeout_seconds: float = 30,
+        http_transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.url = url
         self.token = token
         self.timeout = timedelta(seconds=timeout_seconds)
+        self.http_transport = http_transport
 
     @asynccontextmanager
     async def _session(self) -> AsyncIterator[Any]:
@@ -122,6 +130,7 @@ class StreamableHTTPRouterClient:
                             headers=headers,
                             timeout=self.timeout.total_seconds(),
                             follow_redirects=False,
+                            transport=self.http_transport,
                         )
                     )
                     transport = streamable_http_client(self.url, http_client=http_client)

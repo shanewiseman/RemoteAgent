@@ -53,6 +53,36 @@ before importing a credential file of a different type.
 networks but never volumes. `--force` may interrupt active jobs and should be
 reserved for a failed drain or unhealthy daemon.
 
+## Readiness and scheduler health
+
+`GET /health` and `/healthz` report process liveness only. Bearer-protected
+`/readyz` reports a structured top-level `ready`, `degraded`, or `not_ready`
+state with database, cache, scheduler, cron, and dashboard components. Database
+availability and every configured scheduler worker are mandatory when
+`REMOTEAGENT_SCHEDULER_ENABLED=true`; a missing worker or database failure
+returns `503`. Redis/cache, cron, and dashboard problems are reported as
+optional degradation with HTTP `200`, and a disabled scheduler is explicitly
+non-mandatory. `doctor` requires a fully ready response and treats degradation
+as a failed operational check.
+
+## Job deadlines and cleanup
+
+`REMOTEAGENT_JOB_TIMEOUT_SECONDS` is an absolute end-to-end deadline measured
+from the durable job creation timestamp, not a new timeout started when Codex
+runs. Queueing, revision/workspace/companion preparation, lease wait,
+dependency provisioning, Codex execution, artifact collection, and success
+persistence all consume the same four-hour default budget. Work that expires
+before claim becomes `expired`; work that exceeds the deadline after claim
+becomes `failed`. User cancellation becomes `cancelled`, while router shutdown
+or lease loss becomes `interrupted`.
+
+Runtime release and fenced lease release are independently bounded by
+`REMOTEAGENT_JOB_CLEANUP_TIMEOUT_SECONDS`, 60 seconds by default. Runtime
+cleanup failure is logged without rewriting a durable terminal outcome. Lease
+cleanup preserves an original lifecycle failure; if an otherwise successful
+attempt cannot release its lease before terminal commit, the job fails rather
+than reporting success with uncertain ownership.
+
 ## Cron schedules
 
 Schedules are managed through the seven cron MCP tools, not through public
@@ -87,6 +117,13 @@ Rotating either internal token recreates router and cron together. `cron-mcp`
 and `cron-api` can be selected separately; `all` also rotates the external
 router bearer. Rotation interrupts active scheduled work, so use an idle
 maintenance window.
+
+Cron worker tests cover startup recovery, occurrence ownership and
+deduplication, ambiguous submission replay, post-dispatch/cleanup retries,
+deadline cancellation, and response-lease fencing. A real FastMCP Streamable
+HTTP test covers bearer initialization, typed calls, malformed payloads, and
+idempotent replay across the router/cron boundary. These deterministic checks
+do not replace the local PostgreSQL or recovery smokes described below.
 
 ## Dashboard
 
@@ -168,6 +205,16 @@ scripts/remotectl agent build research-agent --pull
 scripts/remotectl agent register research-agent
 ```
 
+`agent validate` and API registration use the same dependency-free validator on
+Docker Compose's resolved JSON model. It requires exactly the declared runner
+and dependencies, one agent-owned network, the exact ordered platform mounts,
+required labels and runner identity/isolation, bounded resources/logs, prebuilt
+bounded dependencies, and health timing within the Compose wait budget. Unsafe
+ports, namespaces, sockets, binds, services, profiles, volumes, and ownership
+controls are rejected rather than delegated to review. Health-command semantics
+and trusted image contents still require review. The reference projects pass
+`scripts/remotectl validate --all`.
+
 Registration is idempotent for an unchanged definition. Replacing an existing
 definition requires `--replace`; revisions are retained so existing job history
 remains interpretable.
@@ -225,15 +272,37 @@ work. When the router is idle, it opens a brief maintenance window, stops the
 router, captures both stores, and restarts router then cron even if backup
 fails. PostgreSQL stays available throughout.
 
-Restore is destructive, stops cron before router and Redis, verifies checksums
-first, and replaces database/runtime state. It renders the SQL archive before
-mutation, then drops/recreates only the application `public` schema and restores
-it in one database transaction. This removes current objects absent from an
-older archive—for example cron tables when restoring a 0.1 backup—while leaving
-the prior schema intact if a restore statement fails. After filesystem state is
-swapped, the command always starts PostgreSQL/Redis/router, waits for router
-health and migrations, then starts and waits for cron. Take and verify an
-external copy before restoring over a working deployment.
+Restore is destructive. Before stopping services or replacing either durable
+store, it verifies the strict outer archive and checksums, validates and extracts
+the two allowed runtime trees, rejects special archive members and symlink
+restore targets, and uses an isolated PostgreSQL tool container with networking
+disabled and no live volumes or secrets to list and fully render the dump as
+SQL. It then stops cron, router, Redis, and PostgreSQL and verifies quiescence
+before it moves the existing conversation and
+artifact-store trees into owner-only staging; installs the verified replacement
+trees; and starts PostgreSQL alone.
+
+One `psql --single-transaction` invocation resets and restores only the
+application `public` schema and reconciles unclaimed companion-stage rows whose
+ephemeral bytes were intentionally excluded. This removes current objects
+absent from an older archive, including cron tables when restoring a pre-cron
+backup. A tree-swap failure occurs before database mutation and restores the old
+trees. Failure to start PostgreSQL restores both prior trees before any SQL
+mutation. A database failure rolls back the transaction and then restores both old
+trees. If either rollback cannot complete, all core services remain stopped and
+the retained staging directory is reported for manual recovery. Only after the
+database commit and both tree replacements succeed are the predecessors
+removed; router starts with PostgreSQL and Redis, then cron starts after router
+health. This is coordinated rollback across two durability systems, not a
+single atomic database/filesystem transaction. Take and verify an external copy
+before restoring over a working deployment.
+
+The repository includes a disposable recovery harness for current and pre-cron
+archives, continuation and content hashes, removal of newer objects, the tree
+and database rollback branches, rollback failure, and router-before-cron startup
+order. Its CLI/focused tests and the live local recovery smoke pass, including
+disposable cleanup. This one local drill does not establish a scheduled/off-host
+backup cadence, CI recovery gate, RPO, or RTO.
 
 ## Cleanup
 
@@ -243,13 +312,46 @@ than the selected cutoff. It never infers database state from directory names
 and does not delete any conversation or job data on disk. No command invokes an
 unscoped `docker system prune`.
 
-## Live smoke test
+The router's retention worker separately commits database deletion intent
+before external filesystem deletion. At startup and on every retention pass it
+reconciles the artifact store against active jobs and durable artifact rows.
+With the default `REMOTEAGENT_ARTIFACT_ORPHAN_GRACE_SECONDS=3600`, only stale
+paths beneath confined, syntactically valid job directories are eligible;
+symlinks are removed without being followed. Every path failure is isolated and
+retried later. Conversation tombstones and their job inventory remain durable
+until workspace and artifact cleanup both succeed, preserving retry evidence.
+
+## Acceptance smoke tests
 
 ```sh
 scripts/remotectl smoke network
+scripts/remotectl smoke postgres
+scripts/remotectl smoke recovery --timeout 1800
 scripts/remotectl smoke live --agent joke-agent --timeout 300
 scripts/remotectl smoke live --agent repository-critic --timeout 900
 ```
+
+`smoke postgres` refuses a non-local Docker context, starts one uniquely named
+PostgreSQL 17.6 container and volume on an ephemeral loopback port, runs both
+migration chains with four observed advisory-lock waiters, and exercises router lease contention/fencing,
+conversation sequencing, companion claims, and cron response leases. Cleanup
+of its exact, ownership-labeled container and volume runs even after an
+ambiguous creation failure. The local release-verification run passed with
+both resources confirmed removed. CI and off-host recovery remain deferred.
+
+`smoke recovery` creates unique state, secrets, project, port, containers,
+networks, and volumes without reading or writing the configured deployment. It
+exercises the real backup/verify/restore commands and the recovery cases listed
+above, then removes the disposable project and state. Its default total timeout
+is 1,800 seconds, with a separate shared 90-second cleanup budget. Cleanup
+verifies the absence of project containers, volumes, and networks before
+removing local state; a cleanup failure preserves the exact project and recovery
+files and reports both the primary and cleanup errors. The recorded local run
+passed current and pre-cron restore,
+continuation identity, companion/artifact hashes, newer-object removal, all
+three rollback failpoints, router-before-cron startup, and disposable cleanup.
+Repeat it on the reviewed local Docker daemon for future release qualification;
+it is not a CI, scheduled, or off-host recovery control.
 
 The joke workflow discovers the agent, submits one new asynchronous prompt,
 polls it, then submits a second turn with the same conversation key. Unique

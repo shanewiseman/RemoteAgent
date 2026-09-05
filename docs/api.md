@@ -138,9 +138,19 @@ Content-Type: application/json
 The path is interpreted on the RemoteAgent server, not on the caller. It must
 resolve inside the agent's top-level directory. The ID must be a lowercase slug
 matching `^[a-z0-9][a-z0-9_-]{0,62}$`; the Compose project name is fixed to
-`remoteagent-<agent-id>`. The runner and every declared dependency must exist in
-the resolved Compose model, and dependency services must have enabled health
-checks. Controller-reserved and `DOCKER_*` environment variables are rejected.
+`remoteagent-<agent-id>`. The API and `remotectl validate` apply the same
+dependency-free validator to Docker Compose's fully resolved JSON model. That
+model must contain exactly the runner and declared dependencies on one
+agent-owned egress network. The runner must use the expected versioned image and
+profile, configured non-root identity, read-only root filesystem, bounded
+`/tmp`, dropped capabilities, approved security options, exact five ordered
+platform mounts, required lifecycle labels, bounded resources and logs, and no
+entrypoint, command, namespace, port, socket, or undeclared-resource escape.
+Dependencies must use non-`latest` prebuilt images, agent-owned volumes, the
+same network, bounded resources and logs, and enabled finite health checks whose
+failure envelope fits the Compose wait budget. Health-command semantics and
+the trusted contents of reviewed images remain operator-review boundaries.
+Controller-reserved and `DOCKER_*` environment variables are rejected.
 
 Registration is idempotent when the submitted definition is unchanged. A
 different definition returns `409` unless `replace` is true. Replacement creates
@@ -317,6 +327,18 @@ an active job is cooperative: the returned `JobView` can retain its current
 status until the scheduler stops it. Cancelling an already terminal job returns
 that job unchanged.
 
+Every accepted job has one absolute deadline equal to its durable `created_at`
+plus `REMOTEAGENT_JOB_TIMEOUT_SECONDS` (four hours by default). Time spent
+queued, preparing the revision/workspace/companions, waiting for the global
+lease, provisioning dependencies, running Codex, collecting artifacts, and
+committing success all consumes that budget. A job found overdue before claim
+becomes `expired`; an overdue claimed job becomes `failed`. User-requested
+cancellation becomes `cancelled`, while lease loss or router shutdown becomes
+`interrupted`; clients should treat the polled durable status as authoritative.
+Runtime release and fenced lease release have a separate
+`REMOTEAGENT_JOB_CLEANUP_TIMEOUT_SECONDS` bound (60 seconds by default), so
+cleanup cannot extend indefinitely beyond the turn deadline.
+
 Archival requires all jobs to be terminal and prevents future turns. Deletion
 also requires no active jobs and removes the conversation record, workspaces,
 sessions, and stored artifact data. Treat deletion as irreversible.
@@ -469,6 +491,13 @@ errors use the JSON error envelope.
 Artifact count, file-size, and retention limits are deployment settings. The
 defaults accept up to 1000 changed files per job and 100 MiB per file. Clients
 must not assume those defaults on another deployment.
+
+At router startup and during every retention pass, storage reconciliation
+compares confined artifact paths with durable artifact rows. Active-job
+directories and every durable artifact path are preserved. Only stale paths in
+valid job directories become eligible after
+`REMOTEAGENT_ARTIFACT_ORPHAN_GRACE_SECONDS` (one hour by default); symlinks are
+never followed, and a per-path failure is isolated for retry on a later pass.
 
 ### HTTP errors
 
@@ -668,6 +697,12 @@ submission and the generation/instant-derived idempotency key is reused after
 an ambiguous failure. Cron polls through `get_prompt_status`, requests
 cancellation after the configured run deadline, and stores a response only for
 `succeeded` jobs.
+
+Startup recovery, execution ownership, ambiguous-acceptance replay,
+post-dispatch/cleanup retry, and response-lease fencing are covered by
+deterministic worker tests. A real FastMCP Streamable HTTP boundary test also
+exercises bearer initialization, typed calls, malformed payload rejection, and
+idempotent replay across the router/cron client boundary.
 
 Cron schedule schemas are unchanged and have no companion field. The scoped
 cron role is also rejected if it attempts a non-empty companion binding through
@@ -892,6 +927,18 @@ the versioned application API:
   `/dashboard`;
 - bearer-protected Prometheus exposition at `GET /metrics`;
 - interactive `/docs` and `/redoc` pages.
+
+`GET /health` and `GET /healthz` are shallow process-liveness checks that return
+`{"status":"ok"}` without testing dependencies. Authenticated `/readyz` returns
+a top-level `status` of `ready`, `degraded`, or `not_ready` plus structured
+`database`, `cache`, `scheduler`, `cron`, and `dashboard` components. Database
+availability and, when enabled, all configured scheduler workers are mandatory;
+either failure returns HTTP `503`. A disabled scheduler is reported as
+non-mandatory. Redis/cache, cron, and dashboard problems are optional
+degradations and therefore return HTTP `200` with `status: "degraded"`; the
+cache component identifies whether the router is using Redis or process-local
+memory. Readiness is an operational schema excluded from OpenAPI and may evolve
+outside the versioned application contract.
 
 Dashboard JSON, SSE event payloads, HTML, CSS, JavaScript, diagnostic bundles,
 and Prometheus metric names may change without an `/api/v1` compatibility

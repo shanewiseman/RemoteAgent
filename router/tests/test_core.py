@@ -25,6 +25,7 @@ from remoteagent.cache import MemoryCache
 from remoteagent.compose import ComposeProjectValidator, ComposeValidationError
 from remoteagent.config import Settings
 from remoteagent.db import create_engine, create_session_factory, initialize_schema
+from remoteagent.environment import safe_compose_environment
 from remoteagent.jobs import ConversationConflictError, JobService
 from remoteagent.lease import LeaseManager
 from remoteagent.migration import run_online_migrations
@@ -192,18 +193,35 @@ def _run_remotectl_agent_validation(
     config_toml: str,
     *,
     schema_declaration: str = "schema_version = 1\n",
+    manifest_environment: dict[str, str] | None = None,
+    docker_capture: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     repository = tmp_path / "repository"
     agent = repository / "network-agent"
     scripts = repository / "scripts"
+    router_source = repository / "router" / "src" / "remoteagent"
     fake_bin = tmp_path / "bin"
     agent.mkdir(parents=True)
     scripts.mkdir()
+    router_source.mkdir(parents=True)
     fake_bin.mkdir()
 
-    source = Path(__file__).parents[2] / "scripts" / "remotectl"
-    shutil.copy2(source, scripts / "remotectl")
+    source_root = Path(__file__).parents[2]
+    shutil.copy2(source_root / "scripts" / "remotectl", scripts / "remotectl")
+    shutil.copy2(
+        source_root / "router" / "src" / "remoteagent" / "compose_contract.py",
+        router_source / "compose_contract.py",
+    )
+    shutil.copy2(
+        source_root / "router" / "src" / "remoteagent" / "environment.py",
+        router_source / "environment.py",
+    )
     (repository / ".env").write_text("", encoding="utf-8")
+    environment_table = ""
+    if manifest_environment:
+        environment_table = "\n[environment]\n" + "".join(
+            f"{key} = {json.dumps(value)}\n" for key, value in manifest_environment.items()
+        )
     (agent / "agent.toml").write_text(
         f"""{schema_declaration}id = "network-agent"
 name = "Network agent"
@@ -214,7 +232,7 @@ runner_service = "agent"
 enabled = true
 config_file = "config.toml"
 base_context_file = "AGENTS.md"
-""",
+""" + environment_table,
         encoding="utf-8",
     )
     (agent / "config.toml").write_text(config_toml, encoding="utf-8")
@@ -224,15 +242,73 @@ base_context_file = "AGENTS.md"
     (agent / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
     (agent / "AGENTS.md").write_text("Fixture.\n", encoding="utf-8")
     fake_docker = fake_bin / "docker"
+    capture_script = ""
+    if docker_capture is not None:
+        capture_script = (
+            "import json, os, pathlib, sys\n"
+            f"pathlib.Path({str(docker_capture)!r}).write_text("
+            "json.dumps({'environment': dict(os.environ), 'argv': sys.argv}))\n"
+        )
     fake_docker.write_text(
-        """#!/usr/bin/env python3
+        "#!/usr/bin/env python3\n" + capture_script + """
 import json
+import os
 import sys
 
 if sys.argv[-2:] == ["config", "--services"]:
     print("agent")
 elif sys.argv[-3:] == ["config", "--format", "json"]:
-    print(json.dumps({"services": {"agent": {}}}))
+    workspace = os.environ["REMOTEAGENT_WORKSPACE_PATH"]
+    sessions = os.environ["REMOTEAGENT_SESSIONS_PATH"]
+    artifacts = os.environ["REMOTEAGENT_ARTIFACTS_PATH"]
+    print(json.dumps({
+        "name": "remoteagent-network-agent",
+        "services": {"agent": {
+            "image": "remoteagent/network-agent:local",
+            "profiles": ["runner"],
+            "user": "1000:1000",
+            "read_only": True,
+            "cap_drop": ["ALL"],
+            "security_opt": [
+                "no-new-privileges:true",
+                "seccomp=unconfined",
+                "apparmor=unconfined",
+            ],
+            "tmpfs": ["/tmp:size=64m,mode=1777"],
+            "networks": {"egress": None},
+            "labels": {
+                "io.remoteagent.managed": "true",
+                "io.remoteagent.instance": "remoteagent",
+                "io.remoteagent.agent.id": "network-agent",
+                "io.remoteagent.job.id": "validation",
+                "io.remoteagent.conversation.key": "validation",
+            },
+            "volumes": [
+                {"type": "volume", "source": "codex-auth", "target": "/home/agent/.codex"},
+                {"type": "bind", "source": sessions, "target": "/home/agent/.codex/sessions"},
+                {"type": "bind", "source": workspace, "target": "/workspace"},
+                {"type": "bind", "source": artifacts, "target": "/workspace/artifacts"},
+                {
+                    "type": "volume",
+                    "source": "common-skills",
+                    "target": "/opt/remoteagent/skills",
+                    "read_only": True,
+                },
+            ],
+            "cpus": 2.0,
+            "mem_limit": "2g",
+            "pids_limit": 256,
+            "logging": {
+                "driver": "local",
+                "options": {"max-file": "3", "max-size": "10m"},
+            },
+        }},
+        "networks": {"egress": {"name": "remoteagent-network-agent_egress"}},
+        "volumes": {
+            "codex-auth": {"external": True, "name": "remoteagent-codex-auth"},
+            "common-skills": {"external": True, "name": "remoteagent-common-skills"},
+        },
+    }))
 else:
     raise SystemExit(2)
 """,
@@ -248,6 +324,68 @@ else:
         text=True,
         env=environment,
     )
+
+
+def test_remotectl_and_router_share_compose_interpolation_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_environment = {"AGENT_MODE": "manifest\nvalue with $literal syntax"}
+    monkeypatch.setenv("AGENT_MODE", "unrelated-host-value")
+    monkeypatch.setenv("REMOTEAGENT_BEARER_TOKEN", "must-not-reach-compose")
+    monkeypatch.setenv("PGPASSWORD", "must-not-reach-compose")
+    monkeypatch.setenv("UNRELATED_API_TOKEN", "must-not-reach-compose")
+    monkeypatch.setenv("COMPOSE_ENV_FILES", "/must/not/read/operator/secrets")
+    monkeypatch.setenv("COMPOSE_DISABLE_ENV_FILE", "0")
+    monkeypatch.setenv("REMOTEAGENT_BUILD_NETWORK", "bridge")
+    capture = tmp_path / "compose-inputs.json"
+    result = _run_remotectl_agent_validation(
+        tmp_path,
+        'cli_auth_credentials_store = "file"\napproval_policy = "never"\n'
+        'sandbox_mode = "read-only"\n',
+        manifest_environment=manifest_environment,
+        docker_capture=capture,
+    )
+    assert result.returncode == 0, result.stderr
+    captured = json.loads(capture.read_text(encoding="utf-8"))
+    environment = captured["environment"]
+    expected = safe_compose_environment(manifest_environment)
+    for key, value in expected.items():
+        if key != "PATH":  # The CLI fixture prepends its fake Docker binary.
+            assert environment[key] == value
+    for name in ("REMOTEAGENT_BEARER_TOKEN", "PGPASSWORD", "UNRELATED_API_TOKEN"):
+        assert name not in environment
+    assert environment["REMOTEAGENT_JOB_ID"] == "validation"
+    assert environment["REMOTEAGENT_CONVERSATION_KEY"] == "validation"
+    assert environment["REMOTEAGENT_WORKSPACE_PATH"].endswith("/empty/workspace")
+    assert environment["COMPOSE_DISABLE_ENV_FILE"] == "1"
+    assert environment["COMPOSE_ENV_FILES"] == ""
+    argv = captured["argv"]
+    assert argv[argv.index("--env-file") + 1] == os.devnull
+    profiles = [argv[index + 1] for index, value in enumerate(argv) if value == "--profile"]
+    assert "*" in profiles  # Hidden-profile services must be validated too.
+
+
+@pytest.mark.parametrize(
+    "name", ["COMPOSE_ENV_FILES", "COMPOSE_DISABLE_ENV_FILE", "REMOTEAGENT_BUILD_NETWORK"]
+)
+def test_compose_controller_environment_is_rejected_by_router_and_remotectl(
+    tmp_path: Path, name: str
+) -> None:
+    with pytest.raises(ValueError, match="controller-reserved"):
+        AgentDefinition(
+            id="network-agent",
+            name="Network agent",
+            compose_file="network-agent/compose.yaml",
+            environment={name: "override"},
+        )
+    result = _run_remotectl_agent_validation(
+        tmp_path,
+        'cli_auth_credentials_store = "file"\napproval_policy = "never"\n'
+        'sandbox_mode = "read-only"\n',
+        manifest_environment={name: "override"},
+    )
+    assert result.returncode != 0
+    assert "controller-reserved" in result.stderr
 
 
 def _run_remotectl_phonebook_validation(
@@ -410,6 +548,16 @@ def test_remotectl_doctor_preflights_managed_local_code_mode_host() -> None:
     assert '$(dirname "$codex_native_path")/codex-code-mode-host' in remotectl
     assert 'test -x "$code_mode_host_path"' in remotectl
     assert '"$code_mode_host_path" --help >/dev/null' in remotectl
+
+
+def test_remotectl_doctor_checks_authenticated_router_readiness() -> None:
+    repository = Path(__file__).parents[2]
+    remotectl = (repository / "scripts" / "remotectl").read_text(encoding="utf-8")
+
+    assert "Router authenticated readiness" in remotectl
+    assert 'Authorization: Bearer ${router_bearer}' in remotectl
+    assert '"$(router_url)/readyz"' in remotectl
+    assert '{"database", "scheduler", "cache", "dashboard", "cron"}' in remotectl
 
 
 def test_postgres_migration_lock_is_acquired_inside_committed_scope() -> None:

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .compose_contract import ComposeContract, ComposeContractError, validate_compose_document
 from .environment import safe_compose_environment
 from .schemas import AgentDefinition
 
@@ -16,9 +17,10 @@ class ComposeValidationError(ValueError):
 class ComposeProjectValidator:
     """Ask Docker Compose to resolve the project and enumerate real services."""
 
-    def __init__(self, binary: str, state_root: Path) -> None:
+    def __init__(self, binary: str, state_root: Path, *, wait_timeout_seconds: int = 120) -> None:
         self.binary = binary
         self.state_root = state_root
+        self.wait_timeout_seconds = wait_timeout_seconds
 
     async def validate(self, definition: AgentDefinition) -> None:
         expected_project = f"remoteagent-{definition.id}"
@@ -28,6 +30,8 @@ class ComposeProjectValidator:
         environment = safe_compose_environment(definition.environment)
         environment.update(
             {
+                "REMOTEAGENT_CONVERSATION_KEY": "validation",
+                "REMOTEAGENT_JOB_ID": "validation",
                 "REMOTEAGENT_WORKSPACE_PATH": str(placeholder / "workspace"),
                 "REMOTEAGENT_SESSIONS_PATH": str(placeholder / "sessions"),
                 "REMOTEAGENT_ARTIFACTS_PATH": str(placeholder / "artifacts"),
@@ -62,11 +66,37 @@ class ComposeProjectValidator:
         services = document.get("services") if isinstance(document, dict) else None
         if not isinstance(services, dict):
             raise ComposeValidationError("Compose project has no services model")
-        self.validate_services(definition, services)
+        contract = ComposeContract(
+            agent_id=definition.id,
+            project_name=expected_project,
+            runner_service=definition.runner_service,
+            dependency_services=tuple(definition.dependency_services),
+            workspace_path=str(placeholder / "workspace"),
+            sessions_path=str(placeholder / "sessions"),
+            artifacts_path=str(placeholder / "artifacts"),
+            version=environment.get("REMOTEAGENT_VERSION", "local"),
+            uid=environment.get("REMOTEAGENT_UID", "1000"),
+            gid=environment.get("REMOTEAGENT_GID", "1000"),
+            auth_volume=environment.get("REMOTEAGENT_AUTH_VOLUME", "remoteagent-codex-auth"),
+            skills_volume=environment.get(
+                "REMOTEAGENT_SKILLS_VOLUME", "remoteagent-common-skills"
+            ),
+            instance_id=environment.get("REMOTEAGENT_INSTANCE_ID", "remoteagent"),
+            cpu_limit=environment.get("REMOTEAGENT_AGENT_CPU_LIMIT", "2.0"),
+            memory_limit=environment.get("REMOTEAGENT_AGENT_MEMORY_LIMIT", "2g"),
+            wait_timeout_seconds=self.wait_timeout_seconds,
+        )
+        try:
+            validate_compose_document(document, contract)
+        except ComposeContractError as exc:
+            raise ComposeValidationError(str(exc)) from exc
 
     @staticmethod
     def validate_services(definition: AgentDefinition, services: dict[str, Any]) -> None:
-        """Validate the service contract after Compose has resolved the model."""
+        """Compatibility helper for dependency-health unit tests.
+
+        Full registration validation is performed by ``validate_compose_document``.
+        """
 
         required = {definition.runner_service, *definition.dependency_services}
         missing = required - set(services)

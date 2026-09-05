@@ -110,7 +110,11 @@ def create_app(
     if validate_compose is None:
         validate_compose = isinstance(selected_runtime, DockerComposeRuntime)
     compose_validator = (
-        ComposeProjectValidator(settings.compose_binary, settings.data_dir)
+        ComposeProjectValidator(
+            settings.compose_binary,
+            settings.data_dir,
+            wait_timeout_seconds=settings.compose_wait_timeout_seconds,
+        )
         if validate_compose
         else None
     )
@@ -159,6 +163,7 @@ def create_app(
         session_factory,
         ttl_seconds=settings.subscription_lease_ttl_seconds,
         retry_seconds=settings.subscription_lease_retry_seconds,
+        cleanup_timeout_seconds=settings.job_cleanup_timeout_seconds,
     )
     scheduler = Scheduler(
         settings,

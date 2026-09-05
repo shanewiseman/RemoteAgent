@@ -38,7 +38,7 @@ def test_router_release_version_is_consistent_across_independent_contracts() -> 
     release = re.search(r"\| Product release \| RemoteAgent ([0-9.]+) /", requirements)
 
     assert release is not None
-    assert {package_version, API_VERSION, openapi_version, release.group(1)} == {"0.4.0"}
+    assert {package_version, API_VERSION, openapi_version, release.group(1)} == {"0.4.1"}
 
 
 @pytest.mark.asyncio

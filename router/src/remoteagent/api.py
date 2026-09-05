@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 
 from .agents import AgentConflictError, AgentNotFoundError
@@ -68,32 +68,105 @@ def build_api_router() -> APIRouter:
         return {"status": "ok"}
 
     @router.get("/readyz", include_in_schema=False)
-    async def ready(request: Request) -> dict[str, Any]:
+    async def ready(request: Request) -> JSONResponse:
         container = request.app.state.container
+        mandatory_ready = True
+        degraded = False
+
         try:
             async with container.session_factory() as session:
                 await session.execute(text("SELECT 1"))
-            cache_ready = await container.cache.ping()
-        except Exception as exc:
-            raise HTTPException(
-                status_code=503, detail="router dependencies are unavailable"
-            ) from exc
+            database: dict[str, Any] = {"status": "ready", "mandatory": True}
+        except Exception:
+            database = {
+                "status": "not_ready",
+                "mandatory": True,
+                "detail": "database is unavailable",
+            }
+            mandatory_ready = False
+
+        cache_backend = str(getattr(container.cache, "backend", "unknown"))
+        try:
+            cache_ready = bool(await container.cache.ping())
+        except Exception:
+            cache_ready = False
+        cache: dict[str, Any] = {
+            "status": "ready",
+            "mandatory": False,
+            "backend": cache_backend,
+        }
+        if not cache_ready:
+            cache.update(status="degraded", detail="cache is unavailable")
+            degraded = True
+        elif container.settings.redis_url and cache_backend != "redis":
+            cache.update(
+                status="degraded",
+                detail="configured Redis is unavailable; using process-local memory",
+            )
+            degraded = True
+
+        scheduler_enabled = container.settings.scheduler_enabled
+        scheduler_running = container.scheduler.running if scheduler_enabled else False
+        if not scheduler_enabled:
+            scheduler: dict[str, Any] = {
+                "status": "disabled",
+                "mandatory": False,
+                "configured_workers": container.settings.scheduler_concurrency,
+                "live_workers": 0,
+            }
+        else:
+            scheduler = {
+                "status": "ready" if scheduler_running else "not_ready",
+                "mandatory": True,
+                "configured_workers": container.settings.scheduler_concurrency,
+                "live_workers": container.scheduler.live_worker_count,
+            }
+            if not scheduler_running:
+                scheduler["detail"] = "one or more scheduler workers are unavailable"
+                mandatory_ready = False
+
         try:
             cron_readiness = await container.cron_service.readiness()
             cron = dict(cron_readiness)
             if cron.get("status") != "ready":
                 cron["status"] = "degraded"
+                degraded = True
         except Exception:
             cron = {"status": "degraded", "detail": "cron service is unavailable"}
-        return {
-            "status": "ready",
-            "database": True,
-            "cache": cache_ready,
-            "scheduler": container.scheduler.running
-            if container.settings.scheduler_enabled
-            else False,
-            "cron": cron,
-        }
+            degraded = True
+        cron["mandatory"] = False
+
+        if not container.settings.dashboard_enabled:
+            dashboard: dict[str, Any] = {"status": "disabled", "mandatory": False}
+        elif not cache_ready:
+            dashboard = {
+                "status": "degraded",
+                "mandatory": False,
+                "detail": "dashboard sessions are unavailable while the cache is down",
+            }
+            degraded = True
+        elif cache_backend == "memory" and not container.settings.dashboard_allow_memory_sessions:
+            dashboard = {
+                "status": "degraded",
+                "mandatory": False,
+                "detail": "dashboard login requires Redis",
+            }
+            degraded = True
+        else:
+            dashboard = {"status": "ready", "mandatory": False}
+
+        status = "not_ready" if not mandatory_ready else "degraded" if degraded else "ready"
+        return JSONResponse(
+            status_code=200 if mandatory_ready else 503,
+            content={
+                "status": status,
+                "database": database,
+                "cache": cache,
+                "scheduler": scheduler,
+                "cron": cron,
+                "dashboard": dashboard,
+            },
+        )
 
     @router.get(
         "/api/v1/agents",
@@ -315,13 +388,14 @@ def build_api_router() -> APIRouter:
     async def delete_conversation(request: Request, conversation_key: str) -> None:
         container = request.app.state.container
         try:
-            job_ids = await container.job_service.delete_conversation(conversation_key)
+            await container.job_service.delete_conversation(
+                conversation_key,
+                artifact_cleanup=container.artifact_service.delete_storage,
+            )
         except ConversationNotFoundError as exc:
             raise HTTPException(status_code=404, detail="conversation not found") from exc
         except ConversationConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        for job_id in job_ids:
-            await container.artifact_service.delete_storage(job_id)
 
     @router.get(
         "/api/v1/artifacts",

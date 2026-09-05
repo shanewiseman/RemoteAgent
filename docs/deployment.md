@@ -174,6 +174,16 @@ live smoke agents before accepting the release. Phonebook synchronization
 creates a missing `repository-critic` but does not overwrite an existing
 durable revision.
 
+Release 0.4.1 also has no database migration and preserves the public REST/MCP
+schemas and `/api/v1`. It makes the four-hour job timeout an absolute
+submission-through-collection deadline, adds truthful structured readiness and
+confined artifact reconciliation, enforces the resolved per-agent Compose
+contract, hardens cron worker/transport verification, and makes database plus
+filesystem restore rollback-coherent. Run both local disposable backend smokes
+before deploying this patch. Backup scheduling, off-host transfer, CI, and
+owner-approved RPO/RTO remain explicitly deferred in
+[the review-disposition register](review-dispositions.md).
+
 For immediate rollback, drain critic jobs and publish a new immutable critic
 revision without `network_access=true`; then disable the managed proxy in the
 image policy and rebuild every agent. For a full 0.3 downgrade, before switching

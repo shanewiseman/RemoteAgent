@@ -60,6 +60,8 @@ Agents and smoke tests:
   agent register ID [--replace]
   smoke live [--agent ID] [--timeout SECONDS] [--keep]
   smoke network
+  smoke postgres
+  smoke recovery [--timeout SECONDS]
 
 Maintenance:
   backup create [--output PATH]
@@ -143,7 +145,8 @@ PY
 agent_compose() {
     local agent_id=$1
     shift
-    docker compose --env-file "$ENV_FILE" --project-name "remoteagent-${agent_id}" \
+    python3 "$ROOT_DIR/router/src/remoteagent/environment.py" \
+        "$ROOT_DIR/${agent_id}/agent.toml" --project-name "remoteagent-${agent_id}" \
         -f "$ROOT_DIR/${agent_id}/compose.yaml" --profile runner "$@"
 }
 
@@ -579,6 +582,8 @@ for table in ("environment", "labels"):
 if not isinstance(manifest.get("metadata", {}), dict):
     raise SystemExit(f"{path}: metadata must be a table")
 reserved = {
+    "COMPOSE_DISABLE_ENV_FILE",
+    "COMPOSE_ENV_FILES",
     "DATABASE_URL",
     "DOCKER_CONFIG",
     "DOCKER_CONTEXT",
@@ -593,6 +598,7 @@ reserved = {
     "REMOTEAGENT_AGENT_MEMORY_LIMIT",
     "REMOTEAGENT_ARTIFACTS_PATH",
     "REMOTEAGENT_AUTH_VOLUME",
+    "REMOTEAGENT_BUILD_NETWORK",
     "REMOTEAGENT_BEARER_TOKEN",
     "REMOTEAGENT_CONVERSATION_KEY",
     "REMOTEAGENT_DATABASE_URL",
@@ -719,21 +725,6 @@ for dependency in dependencies:
 PY
 )
 
-    local services_output required_service
-    services_output=$( \
-        REMOTEAGENT_JOB_ID=validation \
-        REMOTEAGENT_CONVERSATION_KEY=validation \
-        REMOTEAGENT_WORKSPACE_PATH="$(state_root)/empty/workspace" \
-        REMOTEAGENT_SESSIONS_PATH="$(state_root)/empty/sessions" \
-        REMOTEAGENT_ARTIFACTS_PATH="$(state_root)/empty/artifacts" \
-            agent_compose "$agent_id" config --services
-    )
-    while IFS= read -r required_service; do
-        [[ -z "$required_service" ]] && continue
-        grep -Fxq "$required_service" <<<"$services_output" \
-            || die "agent ${agent_id}: Compose service is missing: ${required_service}"
-    done <<<"$required_output"
-
     local compose_model
     compose_model=$( \
         REMOTEAGENT_JOB_ID=validation \
@@ -741,35 +732,16 @@ PY
         REMOTEAGENT_WORKSPACE_PATH="$(state_root)/empty/workspace" \
         REMOTEAGENT_SESSIONS_PATH="$(state_root)/empty/sessions" \
         REMOTEAGENT_ARTIFACTS_PATH="$(state_root)/empty/artifacts" \
-            agent_compose "$agent_id" config --format json
+            agent_compose "$agent_id" --profile '*' config --format json
     )
-    python3 - "$agent_dir/agent.toml" 3<<<"$compose_model" <<'PY'
-import json
-import os
-import pathlib
-import sys
-import tomllib
-
-with pathlib.Path(sys.argv[1]).open("rb") as handle:
-    manifest = tomllib.load(handle)
-with os.fdopen(3, encoding="utf-8") as handle:
-    model = json.load(handle)
-services = model.get("services")
-if not isinstance(services, dict):
-    raise SystemExit(f"{sys.argv[1]}: Compose project has no services model")
-unhealthy = []
-for name in manifest.get("dependency_services", []):
-    service = services.get(name)
-    healthcheck = service.get("healthcheck") if isinstance(service, dict) else None
-    test = healthcheck.get("test") if isinstance(healthcheck, dict) else None
-    disabled = bool(healthcheck.get("disable")) if isinstance(healthcheck, dict) else True
-    if disabled or not isinstance(test, list) or not test or str(test[0]).upper() == "NONE":
-        unhealthy.append(name)
-if unhealthy:
-    raise SystemExit(
-        "dependency services require enabled healthchecks: " + ", ".join(sorted(unhealthy))
-    )
-PY
+    python3 "$ROOT_DIR/router/src/remoteagent/compose_contract.py" \
+        "$agent_dir/agent.toml" \
+        --model-fd 3 \
+        --workspace "$(state_root)/empty/workspace" \
+        --sessions "$(state_root)/empty/sessions" \
+        --artifacts "$(state_root)/empty/artifacts" \
+        --wait-timeout "${REMOTEAGENT_COMPOSE_WAIT_TIMEOUT_SECONDS:-120}" \
+        3<<<"$compose_model"
 
     note "agent ${agent_id}: valid"
 }
@@ -1373,6 +1345,8 @@ with tarfile.open(archive, "r:gz") as bundle:
                 or ".." in target.parts
             ):
                 raise SystemExit(f"unsafe runtime-state archive link: {member.name!r}")
+        elif not (member.isdir() or member.isfile()):
+            raise SystemExit(f"unsafe runtime-state archive special member: {member.name!r}")
 PY
 }
 
@@ -1474,31 +1448,123 @@ restore_command() {
         || die "backup is missing the conversations state tree"
     [[ -d "$staging/state/artifact-store" ]] \
         || die "backup is missing the artifact-store state tree"
-    compose stop cron router redis >/dev/null 2>&1 || true
-    compose up -d --wait postgres
 
-    # Render the custom archive completely before touching the live schema. The
-    # resulting file is inside the owner-only restore staging directory. Feeding
-    # the reset command and rendered archive to one psql single transaction
-    # preserves the old schema if any restore statement fails, while dropping
-    # application objects that are absent from an older archive (notably cron
-    # tables when restoring a pre-0.2 backup).
-    compose exec -T --user postgres postgres pg_restore \
+    # Validate and render the complete custom archive before stopping services or
+    # touching either durable store. Do not use `compose run` here: it inherits
+    # the PostgreSQL service's live data volume, network, and secrets. This
+    # image-only tool has no network, mounts, or credentials and cannot pull a
+    # replacement image during a destructive operation.
+    local pg_restore_tool=(
+        docker run --rm --interactive --pull=never --network none --read-only
+        --security-opt no-new-privileges:true --cap-drop ALL --pids-limit 64
+        --memory 256m --tmpfs /tmp:size=16m,mode=1777
+        --entrypoint pg_restore postgres:17.6-alpine
+    )
+    "${pg_restore_tool[@]}" --list < "$staging/postgres.dump" >/dev/null
+    "${pg_restore_tool[@]}" \
         --no-owner --file=- < "$staging/postgres.dump" > "$staging/postgres.sql"
-    compose exec -T --user postgres postgres psql \
-        --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction \
-        --username "${POSTGRES_USER:-remoteagent}" --dbname "${POSTGRES_DB:-remoteagent}" \
-        --command 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public AUTHORIZATION CURRENT_USER; GRANT USAGE ON SCHEMA public TO PUBLIC;' \
-        --file=- < "$staging/postgres.sql"
+    [[ -s "$staging/postgres.sql" ]] || die "backup PostgreSQL dump rendered no SQL"
 
-    # Unclaimed stage bytes are deliberately excluded from backups. Expire any
-    # restored admission rows before the router can requeue an import or expose
-    # a ready stage whose ephemeral source is gone. The dynamic statement keeps
-    # restores of pre-companion backups valid when the table does not exist.
-    compose exec -T --user postgres postgres psql \
-        --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction \
-        --username "${POSTGRES_USER:-remoteagent}" --dbname "${POSTGRES_DB:-remoteagent}" \
-        --file=- <<'SQL'
+    # Swap complete trees on the same filesystem so files left by the current
+    # deployment cannot survive an older restore. Keep the previous trees in
+    # staging until both replacements have succeeded.
+    local runtime_root conversations_path artifacts_path name target replacement previous
+    runtime_root=$(state_root)
+    conversations_path="$runtime_root/conversations"
+    artifacts_path="$runtime_root/artifact-store"
+    for target in "$conversations_path" "$artifacts_path"; do
+        [[ "$target" = "$runtime_root/conversations" || "$target" = "$runtime_root/artifact-store" ]] \
+            || die "refusing unsafe restore target: $target"
+        [[ ! -L "$target" ]] || die "refusing symlink restore target: $target"
+        mkdir -p "$target"
+    done
+
+    # The drill-only failpoint requires two explicit variables and is never set
+    # by generated deployment configuration. It exercises the real rollback
+    # branches without granting a remote API surface.
+    restore_failpoint() {
+        [[ "${REMOTEAGENT_ALLOW_RESTORE_FAILPOINTS:-false}" = true ]] || return 1
+        local configured
+        IFS=',' read -r -a configured <<<"${REMOTEAGENT_RESTORE_FAILPOINT:-}"
+        local item
+        for item in "${configured[@]}"; do
+            [[ "$item" = "$1" ]] && return 0
+        done
+        return 1
+    }
+
+    rollback_restore_trees() {
+        local rollback_failed=0 rollback_name rollback_target rollback_previous failed_tree
+        for rollback_name in conversations artifact-store; do
+            rollback_target="$runtime_root/$rollback_name"
+            rollback_previous="$staging/previous-$rollback_name"
+            failed_tree="$staging/failed-$rollback_name"
+            [[ -e "$rollback_previous" && ! -L "$rollback_previous" ]] || continue
+            if restore_failpoint "rollback-$rollback_name"; then
+                rollback_failed=1
+                continue
+            fi
+            if [[ -e "$rollback_target" || -L "$rollback_target" ]]; then
+                if ! mv -- "$rollback_target" "$failed_tree"; then
+                    rollback_failed=1
+                    continue
+                fi
+            fi
+            if ! mv -- "$rollback_previous" "$rollback_target"; then
+                rollback_failed=1
+            fi
+        done
+        return "$rollback_failed"
+    }
+
+    # Stop every service before replacing the filesystem snapshot, then bring up
+    # PostgreSQL alone for the transaction. Router and cron cannot observe a
+    # cross-store intermediate state.
+    if ! compose stop cron router redis postgres >/dev/null; then
+        die "failed to stop all core services before restore; no durable state was replaced; inspect the deployment before retrying"
+    fi
+    local running_core
+    if ! running_core=$(compose ps --status running --quiet cron router redis postgres); then
+        die "could not verify core-service quiescence before restore; no durable state was replaced; inspect the deployment before retrying"
+    fi
+    if [[ -n "$running_core" ]]; then
+        die "core services remained running after stop; no durable state was replaced; inspect the deployment before retrying"
+    fi
+    local replaced=()
+    for name in conversations artifact-store; do
+        target="$runtime_root/$name"
+        replacement="$staging/state/$name"
+        previous="$staging/previous-$name"
+        if ! mv -- "$target" "$previous"; then
+            if rollback_restore_trees; then
+                die "failed to preserve runtime tree ${name}; prior trees restored; services remain stopped; run scripts/remotectl start after inspection"
+            fi
+            die "restore rollback failed while preserving ${name}; services remain stopped; recover the previous trees from ${staging} before starting"
+        fi
+        if restore_failpoint "swap-$name" || ! mv -- "$replacement" "$target"; then
+            if rollback_restore_trees; then
+                die "failed to replace restored runtime tree ${name}; prior trees restored; database was untouched; services remain stopped; run scripts/remotectl start after inspection"
+            fi
+            die "restore rollback failed after replacing ${name}; services remain stopped; recover the previous trees from ${staging} before starting"
+        fi
+        replaced+=("$name")
+    done
+
+    if ! compose up -d --wait postgres; then
+        if rollback_restore_trees; then
+            compose stop cron router redis postgres >/dev/null 2>&1 || true
+            die "PostgreSQL failed to start before database restore; prior filesystem trees restored and database was untouched; services remain stopped; run scripts/remotectl start after inspection"
+        fi
+        compose stop cron router redis postgres >/dev/null 2>&1 || true
+        die "PostgreSQL startup and filesystem rollback failed; services remain stopped; recover the previous trees from ${staging} before starting"
+    fi
+
+    # Reset, restore, and reconcile excluded companion stages in one PostgreSQL
+    # transaction. Multiple psql -c/-f actions are covered by --single-transaction.
+    # That drops database objects absent from an older archive (including cron
+    # tables) without exposing a partially restored schema.
+    local stage_reconciliation
+    IFS= read -r -d '' stage_reconciliation <<'SQL' || true
 DO $remoteagent$
 BEGIN
     IF to_regclass('public.companion_stages') IS NOT NULL THEN
@@ -1516,37 +1582,37 @@ BEGIN
 END
 $remoteagent$;
 SQL
-
-    # Swap complete trees on the same filesystem so files left by the current
-    # deployment cannot survive an older restore. Keep the previous trees in
-    # staging until both replacements have succeeded.
-    local runtime_root conversations_path artifacts_path name target replacement previous
-    runtime_root=$(state_root)
-    conversations_path="$runtime_root/conversations"
-    artifacts_path="$runtime_root/artifact-store"
-    for target in "$conversations_path" "$artifacts_path"; do
-        [[ "$target" = "$runtime_root/conversations" || "$target" = "$runtime_root/artifact-store" ]] \
-            || die "refusing unsafe restore target: $target"
-        [[ ! -L "$target" ]] || die "refusing symlink restore target: $target"
-        mkdir -p "$target"
-    done
-    local replaced=()
-    for name in conversations artifact-store; do
-        target="$runtime_root/$name"
-        replacement="$staging/state/$name"
-        previous="$staging/previous-$name"
-        mv -- "$target" "$previous"
-        if ! mv -- "$replacement" "$target"; then
-            mv -- "$previous" "$target"
-            local completed
-            for completed in "${replaced[@]}"; do
-                rm -rf -- "$runtime_root/$completed"
-                mv -- "$staging/previous-$completed" "$runtime_root/$completed"
-            done
-            die "failed to replace restored runtime tree: $name"
+    local database_failpoint_sql=
+    if restore_failpoint database-restore; then
+        IFS= read -r -d '' database_failpoint_sql <<'SQL' || true
+DO $remoteagent_restore_failpoint$
+BEGIN
+    RAISE EXCEPTION 'REMOTEAGENT restore failpoint after restored SQL';
+END
+$remoteagent_restore_failpoint$;
+SQL
+    fi
+    local psql_restore_args=(
+        --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction
+        --username "${POSTGRES_USER:-remoteagent}" --dbname "${POSTGRES_DB:-remoteagent}"
+        --command 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public AUTHORIZATION CURRENT_USER; GRANT USAGE ON SCHEMA public TO PUBLIC;'
+        --file=- --command "$stage_reconciliation"
+    )
+    if [[ -n "$database_failpoint_sql" ]]; then
+        psql_restore_args+=(--command "$database_failpoint_sql")
+    fi
+    if ! compose exec -T --user postgres postgres psql \
+        "${psql_restore_args[@]}" < "$staging/postgres.sql"; then
+        if rollback_restore_trees; then
+            compose stop postgres >/dev/null 2>&1 || true
+            die "database restore failed; prior filesystem trees restored and PostgreSQL transaction rolled back; services remain stopped; run scripts/remotectl start after inspection"
         fi
-        replaced+=("$name")
-    done
+        compose stop cron router redis postgres >/dev/null 2>&1 || true
+        die "database restore and filesystem rollback failed; services remain stopped; recover the previous trees from ${staging} before starting"
+    fi
+
+    # The transaction committed and both restored trees are live. Only now may
+    # the preserved predecessors and owner-only staging directory be removed.
     rm -rf -- "$staging"
     note "starting router after restored database and runtime state"
     compose up -d --wait --wait-timeout 180 postgres redis router
@@ -1746,6 +1812,32 @@ doctor_command() {
         printf '%-34s %s\n' 'Router health' 'not running/unhealthy'
         failures=$((failures + 1))
     fi
+    local readiness router_bearer readiness_status
+    router_bearer=$(router_token)
+    if readiness=$(curl --fail --silent --show-error \
+        --header "Authorization: Bearer ${router_bearer}" \
+        "$(router_url)/readyz" 2>/dev/null) \
+        && readiness_status=$(python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+required = {"database", "scheduler", "cache", "dashboard", "cron"}
+status = payload.get("status")
+if status not in {"ready", "degraded"} or not required.issubset(payload):
+    raise SystemExit(1)
+print(status)
+' <<<"$readiness"); then
+        if [[ "$readiness_status" = ready ]]; then
+            printf '%-34s %s\n' 'Router authenticated readiness' OK
+        else
+            printf '%-34s %s\n' 'Router authenticated readiness' DEGRADED
+            failures=$((failures + 1))
+        fi
+    else
+        printf '%-34s %s\n' 'Router authenticated readiness' 'not running/unready/invalid'
+        failures=$((failures + 1))
+    fi
     if cron_running && compose exec -T cron python -c '
 import urllib.request
 token = open("/run/secrets/cron_api_token", encoding="utf-8").read().strip()
@@ -1852,6 +1944,36 @@ smoke_network() {
         python3 "$ROOT_DIR/scripts/probe_managed_network.py"
 }
 
+smoke_postgres() {
+    (($# == 0)) || die "smoke postgres does not accept options"
+    require_command docker
+    local python_bin=${REMOTEAGENT_POSTGRES_SMOKE_PYTHON:-$ROOT_DIR/.venv/bin/python}
+    if [[ ! -x "$python_bin" ]]; then
+        require_command python3
+        python_bin=$(command -v python3)
+    fi
+    REMOTEAGENT_POSTGRES_SMOKE_JSON="$JSON_OUTPUT" \
+        "$python_bin" "$ROOT_DIR/scripts/smoke_postgres.py"
+}
+
+smoke_recovery() {
+    local timeout=1800
+    while (($#)); do
+        case "$1" in
+            --timeout) timeout=${2:?}; shift ;;
+            *) die "unknown smoke recovery option: $1" ;;
+        esac
+        shift
+    done
+    [[ "$timeout" =~ ^[0-9]+$ ]] && (( timeout >= 60 && timeout <= 7200 )) \
+        || die "smoke recovery --timeout must be between 60 and 7200 seconds"
+    require_command docker
+    require_command python3
+    REMOTEAGENT_RECOVERY_SMOKE_TIMEOUT="$timeout" \
+    REMOTEAGENT_RECOVERY_SMOKE_JSON="$JSON_OUTPUT" \
+        python3 "$ROOT_DIR/scripts/smoke_recovery.py"
+}
+
 bootstrap_command() {
     local non_interactive=0
     [[ "${1:-}" = --non-interactive ]] && non_interactive=1
@@ -1914,7 +2036,9 @@ case "$command_name" in
         case "$smoke_kind" in
             live) smoke_live "$@" ;;
             network) smoke_network "$@" ;;
-            *) die "smoke requires one of: live, network" ;;
+            postgres) smoke_postgres "$@" ;;
+            recovery) smoke_recovery "$@" ;;
+            *) die "smoke requires one of: live, network, postgres, recovery" ;;
         esac
         ;;
     *) die "unknown command: $command_name (run scripts/remotectl help)" ;;

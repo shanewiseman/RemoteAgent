@@ -317,9 +317,10 @@ def build_mcp(container: Any) -> FastMCP:
         """Delete an inactive conversation and its isolated runtime data."""
 
         authorize_mcp_tool(ctx, "delete_conversation")
-        job_ids = await container.job_service.delete_conversation(conversation_key)
-        for job_id in job_ids:
-            await container.artifact_service.delete_storage(job_id)
+        await container.job_service.delete_conversation(
+            conversation_key,
+            artifact_cleanup=container.artifact_service.delete_storage,
+        )
         return ConversationDeleted(conversation_key=conversation_key)
 
     @mcp.tool(name="configure_cron_schedule")

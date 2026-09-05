@@ -18,6 +18,7 @@ marked `Partial`, `Gap`, or `Constraint` rather than implied to exist.
 | [Operations](operations.md) | Routine administration, diagnostics, backup, restore, cleanup, and upgrade procedures. |
 | [Agent authoring](agent-authoring.md) | How to add an agent project, runner image, context, configuration, and dependency services. |
 | [Security](security.md) | Threat model, trust boundaries, credentials, sandboxing, and hardening guidance. |
+| [Repository review dispositions](review-dispositions.md) | Maintainer decisions, evidence, ownership, and closure criteria for repository-critic findings. |
 
 ## Contract authority
 
