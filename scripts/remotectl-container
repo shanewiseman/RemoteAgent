@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Run the administration CLI with the router image's Python and Docker tools.
+set -Eeuo pipefail
+umask 077
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+die() {
+    printf 'remoteagent-admin: %s\n' "$*" >&2
+    exit 1
+}
+
+# Read only literal deployment selectors; never source credentials/configuration
+# into the host shell while choosing which administration image to run.
+literal_setting() {
+    local key=$1 file=$2 line value=""
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == "$key="* ]] || continue
+        value=${line#*=}
+        value=${value%$'\r'}
+        case "$value" in
+            \"*\") value=${value:1:${#value}-2} ;;
+            \'*\') value=${value:1:${#value}-2} ;;
+        esac
+    done < "$file"
+    printf '%s' "$value"
+}
+
+command -v docker >/dev/null 2>&1 || die 'Docker CLI is required on the host'
+env_file=${REMOTEAGENT_ENV_FILE:-${ROOT_DIR}/.env}
+args=()
+while (($#)); do
+    case "$1" in
+        --env-file)
+            [[ $# -ge 2 ]] || die '--env-file requires a path'
+            env_file=$(realpath -m -- "$2")
+            args+=(--env-file "$env_file")
+            shift 2
+            ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+env_file=$(realpath -m -- "$env_file")
+case "$env_file" in
+    "$ROOT_DIR"/*) ;;
+    *) die 'the environment file must be inside the repository mount' ;;
+esac
+
+if [[ -n "${REMOTEAGENT_ADMIN_IMAGE:-}" ]]; then
+    admin_image=$REMOTEAGENT_ADMIN_IMAGE
+else
+    version=$(literal_setting REMOTEAGENT_VERSION "$env_file")
+    version=${version:-local}
+    [[ "$version" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] \
+        || die 'REMOTEAGENT_VERSION must be a literal Docker tag; use REMOTEAGENT_ADMIN_IMAGE to override'
+    admin_image="remoteagent/router:${version}"
+fi
+[[ "$admin_image" != -* && "$admin_image" != *[[:space:]]* ]] \
+    || die 'REMOTEAGENT_ADMIN_IMAGE must be one Docker image reference'
+
+docker_socket=${REMOTEAGENT_DOCKER_SOCKET:-$(literal_setting REMOTEAGENT_DOCKER_SOCKET "$env_file")}
+docker_socket=${docker_socket:-/var/run/docker.sock}
+[[ "$docker_socket" = /* && -S "$docker_socket" ]] \
+    || die 'REMOTEAGENT_DOCKER_SOCKET must identify an existing absolute Unix socket'
+for mount_path in "$ROOT_DIR" "$docker_socket"; do
+    [[ "$mount_path" != *,* && "$mount_path" != *$'\n'* && "$mount_path" != *$'\r'* ]] \
+        || die 'repository and socket paths must not contain commas or line breaks'
+done
+docker_gid=$(stat -c '%g' -- "$docker_socket")
+docker_args=(
+    --host "unix://${docker_socket}" run --rm --pull never --interactive
+    --network host --hostname "$(hostname)"
+    --user "$(id -u):$(id -g)" --group-add "$docker_gid"
+    --read-only --tmpfs /tmp:size=128m,mode=1777
+    --cap-drop ALL --security-opt no-new-privileges:true
+    --mount "type=bind,source=${ROOT_DIR},target=${ROOT_DIR}"
+    --mount "type=bind,source=${docker_socket},target=${docker_socket}"
+    --workdir "$ROOT_DIR"
+    --env "DOCKER_HOST=unix://${docker_socket}"
+    --env "REMOTEAGENT_DOCKER_SOCKET=${docker_socket}"
+    --env "REMOTEAGENT_ENV_FILE=${env_file}"
+    --env "TMPDIR=${ROOT_DIR}/.runtime/admin-tmp"
+    --entrypoint /bin/bash
+)
+# Pipes retain their exact stdin bytes; allocate a terminal only when both ends
+# are terminals, including an interactive SSH session used for device login.
+if [[ -t 0 && -t 1 ]]; then
+    docker_args+=(--tty)
+fi
+# Recovery probes create temporary repositories that child Docker commands bind
+# from the host. Keep those paths on the same-path mount, not container-only /tmp.
+exec docker "${docker_args[@]}" "$admin_image" -c \
+    'umask 077; mkdir -p -- "$TMPDIR"; exec "$@"' \
+    remoteagent-admin "$ROOT_DIR/scripts/remotectl" "${args[@]}"

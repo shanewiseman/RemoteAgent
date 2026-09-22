@@ -10,6 +10,9 @@ settings. Production acceptance status is tracked in the
 - A dedicated Linux server on a trusted internal network.
 - Docker Engine with the Compose v2 plugin and permission to use its socket.
 - Bash, `curl`, `git`, `tar`, and Python 3 for local validation/smoke tooling.
+- Direct host execution of `scripts/remotectl` requires Python 3.11 or newer
+  (`tomllib`). The container administration wrapper below uses the router image's
+  Python 3.12 instead, without installing Python on the host.
 - Outbound HTTPS from agent containers to OpenAI authentication/model services,
   from the router to intended public Git hosts when Git companions are used,
   and from the repository critic to `example.com`, `pypi.org`,
@@ -93,6 +96,88 @@ chmod 600 /secure/path/auth.json
 scripts/remotectl auth import --file /secure/path/auth.json
 ```
 
+### Administration using a prebuilt image
+
+For a host with an older Python installation, use `scripts/remotectl-container`
+in place of `scripts/remotectl`. It runs a disposable administration container
+from the router image, with its Python 3.12, Docker CLI, Compose, and shell tools.
+The host only needs Bash, Docker, and ordinary core utilities. The router image
+must already be built or loaded; the wrapper never pulls an image implicitly.
+
+After loading the release images and copying the reviewed source checkout:
+
+```sh
+REMOTEAGENT_ADMIN_IMAGE=remoteagent/router:RELEASE \
+  scripts/remotectl-container init --non-interactive
+# Set REMOTEAGENT_VERSION=RELEASE in the generated .env to match every image.
+# Set REMOTEAGENT_BIND_ADDRESS to the intended host interface before starting.
+scripts/remotectl-container validate --all
+scripts/remotectl-container skills sync
+scripts/remotectl-container auth login --method chatgpt
+scripts/remotectl-container start
+scripts/remotectl-container doctor
+```
+
+`REMOTEAGENT_ADMIN_IMAGE` selects an explicit helper image. Otherwise the wrapper
+reads only the literal `REMOTEAGENT_VERSION` from `.env` (or `--env-file`) and
+selects `remoteagent/router:<version>`, defaulting to `local`. It does not source
+the environment file into the host shell. The normal CLI reads that
+operator-owned file inside the helper. Alternate environment files must remain
+inside the repository tree.
+
+The helper runs with the invoking user's UID/GID and the Docker socket's group.
+It mounts the repository read-write at the same absolute path, mounts the chosen
+Unix Docker socket, and uses the host network so health checks reach the selected
+host bind address. Both its Docker client and the child Compose commands target
+that socket; a remote Docker context is not used. These are administrative,
+root-equivalent Docker permissions, scoped operationally to the requested CLI
+command. The helper has a read-only root and writable temporary filesystem;
+its execution does not install packages or change host Docker settings.
+Administration scratch lives under `.runtime/admin-tmp` on the same-path mount
+so disposable recovery deployments remain visible to the host Docker daemon.
+
+An interactive terminal is preserved for device login; through SSH, allocate a
+terminal with `ssh -t`. Piped input is passed without terminal processing. For
+credential import, use a protected regular file inside the repository mount;
+the normal import command requires file size and permission checks and does not
+accept a pipe as its `--file`. Never put credential contents in command arguments.
+Backup/restore paths must likewise be
+inside the mounted repository. The default `.runtime/backups` path meets that
+requirement. A source checkout's `.git` directory must be present for the CLI's
+Git-based upgrade commands.
+
+### Codex startup caches and skills
+
+The agent image runs its build-time Codex feature probe as the final non-root
+agent user. This matters on a fresh installation: Docker populates an empty
+auth volume from the image's `$CODEX_HOME`, including any caches created during
+the build. A successful credential import or `auth status` check does not prove
+that an agent can start; finish installation with a live first turn and a
+continuation using the selected release images.
+
+`$CODEX_HOME/skills` is a writable directory for Codex's bundled `.system`
+skills. Individual common skills link into the read-only shared skills volume.
+The entrypoint automatically replaces the old whole-directory symlink only
+when its target exactly matches the configured shared skills path. It preserves
+unrelated custom skills and fails on conflicting paths instead of overwriting
+them. Rebuild the base and every agent image to apply this change.
+
+An existing auth volume created by an older image can retain root-owned
+`$CODEX_HOME/tmp/arg0` caches and fail startup with `Permission denied` even after
+an image rebuild. Quiesce jobs and auth helpers, inspect the affected paths,
+and use a reviewed one-off administration container to restore ownership of
+only the auth volume's `$CODEX_HOME/tmp` subtree to the deployment UID/GID.
+Confirm that the subtree is a real directory and do not follow symlinks during
+the ownership repair. Preserve credentials, sessions, and the rest of the
+volume; rebuilding images does not migrate existing volume contents. This is
+an application-volume repair and requires no host Docker or kernel changes.
+
+For release acceptance, check both an initially empty auth volume and a volume
+with the legacy skills symlink. Verify that a non-root runner can create its
+Codex cache and bundled `.system` skills, discover a common skill, complete a
+real turn, and resume that conversation. Keep the shared skills mount read-only
+throughout these checks.
+
 ## Network placement
 
 The router binds `0.0.0.0:8080` by default. Cron, PostgreSQL, and Redis stay on
@@ -100,6 +185,12 @@ an internal Compose network and publish no host ports. Restrict port 8080 with t
 callers. For TLS, place a reverse proxy on the edge, forward to
 `127.0.0.1:8080`, set `REMOTEAGENT_BIND_ADDRESS=127.0.0.1`, and change
 `REMOTEAGENT_DASHBOARD_ALLOW_HTTP=false` after secure-cookie forwarding works.
+
+For a specific internal interface, set for example
+`REMOTEAGENT_BIND_ADDRESS=192.168.20.111` and `REMOTEAGENT_PORT=8080`.
+Administration checks follow that address. Wildcard IPv4/IPv6 binds use their
+corresponding loopback address for checks; specific IPv6 addresses are bracketed
+when constructing HTTP URLs.
 
 MCP transport rejects unlisted HTTP `Host` values with status 421 to prevent
 DNS rebinding. If callers use a DNS alias, load balancer, reverse-proxy name, or

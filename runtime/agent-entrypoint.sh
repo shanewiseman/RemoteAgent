@@ -44,8 +44,52 @@ if [ ! -e "$workspace/.git" ]; then
     git -C "$workspace" init --quiet
 fi
 
-if [ -d "$skills" ] && [ ! -e "${CODEX_HOME:-/home/agent/.codex}/skills" ]; then
-    ln -s "$skills" "${CODEX_HOME:-/home/agent/.codex}/skills"
+# Codex installs its bundled .system skills beneath CODEX_HOME/skills. Keep
+# that directory writable while individual common skills resolve into the
+# read-only shared volume. Older images linked the entire directory there.
+skills_home=${CODEX_HOME:-/home/agent/.codex}/skills
+if [ -L "$skills_home" ]; then
+    if [ "$(readlink "$skills_home")" != "$skills" ]; then
+        echo "remoteagent: refusing to replace an unrelated CODEX_HOME/skills symlink" >&2
+        exit 73
+    fi
+    rm -- "$skills_home"
+fi
+if [ -e "$skills_home" ] && [ ! -d "$skills_home" ]; then
+    echo "remoteagent: CODEX_HOME/skills must be a directory" >&2
+    exit 73
+fi
+mkdir -p "$skills_home"
+if [ ! -w "$skills_home" ]; then
+    echo "remoteagent: CODEX_HOME/skills must be writable for bundled system skills" >&2
+    exit 73
+fi
+
+# Reconcile only links with the exact shape created here. Removed common skills
+# disappear on the next turn; unrelated custom skills and .system stay intact.
+for skill_link in "$skills_home"/*; do
+    [ -L "$skill_link" ] || continue
+    skill_name=${skill_link##*/}
+    expected_target=$skills/$skill_name
+    if [ "$(readlink "$skill_link")" = "$expected_target" ] \
+        && [ ! -f "$expected_target/SKILL.md" ]; then
+        rm -- "$skill_link"
+    fi
+done
+if [ -d "$skills" ]; then
+    for skill_source in "$skills"/*; do
+        [ -d "$skill_source" ] && [ -f "$skill_source/SKILL.md" ] || continue
+        skill_name=${skill_source##*/}
+        skill_link=$skills_home/$skill_name
+        if [ -L "$skill_link" ] && [ "$(readlink "$skill_link")" = "$skill_source" ]; then
+            continue
+        fi
+        if [ -e "$skill_link" ] || [ -L "$skill_link" ]; then
+            echo "remoteagent: common skill collides with existing CODEX_HOME/skills/$skill_name" >&2
+            exit 73
+        fi
+        ln -s "$skill_source" "$skill_link"
+    done
 fi
 
 exec "$@"

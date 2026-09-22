@@ -258,12 +258,19 @@ async def test_absolute_deadline_covers_success_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = BlockingRuntime(block_in="none")
-    harness = await make_harness(tmp_path, runtime, timeout=1)
+    harness = await make_harness(tmp_path, runtime, timeout=60)
     accepted = await harness.jobs.submit(PromptRequest(agent_id="alpha", prompt="persist"))
-    async with harness.sessions() as session, session.begin():
-        record = await session.get(JobRecord, accepted.job_id)
-        assert record is not None
-        record.created_at = datetime.now(UTC) - timedelta(seconds=0.8)
+
+    # Exercise a real timeout, but expire it only after persistence starts so
+    # database/filesystem setup does not have to finish within a 200 ms window.
+    deadline = asyncio.timeout(None)
+    timeout_delays: list[float] = []
+
+    def controlled_timeout(delay: float) -> asyncio.Timeout:
+        timeout_delays.append(delay)
+        return deadline
+
+    monkeypatch.setattr(asyncio, "timeout", controlled_timeout)
 
     original_transition = harness.jobs.transition
     persistence_started = asyncio.Event()
@@ -271,6 +278,7 @@ async def test_absolute_deadline_covers_success_persistence(
     async def transition(job_id: str, status: JobStatus, **kwargs: Any):
         if status is JobStatus.SUCCEEDED:
             persistence_started.set()
+            deadline.reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
         return await original_transition(job_id, status, **kwargs)
 
@@ -278,6 +286,9 @@ async def test_absolute_deadline_covers_success_persistence(
     assert await harness.scheduler.run_once()
     failed = await harness.jobs.get(accepted.job_id)
     assert persistence_started.is_set()
+    assert len(timeout_delays) == 1
+    assert 0 < timeout_delays[0] <= harness.settings.job_timeout_seconds
+    assert deadline.expired()
     assert failed.status is JobStatus.FAILED
     assert failed.error == "job exceeded the configured end-to-end deadline"
     assert runtime.released == [accepted.job_id]

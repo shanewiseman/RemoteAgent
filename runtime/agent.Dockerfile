@@ -86,6 +86,7 @@ COPY --chmod=0755 runtime/agent-entrypoint.sh /usr/local/bin/remoteagent-agent-e
 # A model profile may require Codex's stable local code-mode host even though
 # the user-selectable code_mode experiment stays disabled. Fail the image build
 # if either the managed feature state or its pinned companion binary is absent.
+USER agent
 RUN codex_features="$(codex features list)" \
     && printf '%s\n' "$codex_features" \
         | grep -Eq '^code_mode_host[[:space:]]+stable[[:space:]]+true$' \
@@ -96,7 +97,6 @@ RUN codex_features="$(codex features list)" \
     && test -x "$code_mode_host_path" \
     && "$code_mode_host_path" --help >/dev/null
 
-USER agent
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/remoteagent-agent-entrypoint"]
 CMD ["codex", "--version"]

@@ -180,7 +180,14 @@ secret_path() {
 }
 
 router_url() {
-    printf 'http://127.0.0.1:%s' "${REMOTEAGENT_PORT:-8080}"
+    local address=${REMOTEAGENT_BIND_ADDRESS:-0.0.0.0}
+    case "$address" in
+        0.0.0.0|'') address=127.0.0.1 ;;
+        ::|'[::]') address='[::1]' ;;
+        \[*\]) ;; # Already bracketed IPv6.
+        *:*) address="[${address}]" ;;
+    esac
+    printf 'http://%s:%s' "$address" "${REMOTEAGENT_PORT:-8080}"
 }
 
 router_token() {
